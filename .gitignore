@@ -1,0 +1,6 @@
+target/
+dist/
+data/
+*.db-wal
+*.db-shm
+.playwright-mcp/

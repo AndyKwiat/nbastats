@@ -1,0 +1,24 @@
+[package]
+name = "nbastats"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "app"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
+tower-http = { version = "0.6", features = ["fs", "compression-gzip", "set-header"] }
+ureq = { version = "2", features = ["json"] }
+
+[profile.release]
+opt-level = 3
+strip = true
+lto = "thin"
