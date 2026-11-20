@@ -1,3 +1,4 @@
+mod betting;
 mod db;
 mod fetch;
 mod stats;
@@ -18,6 +19,7 @@ use tower_http::{compression::CompressionLayer, services::ServeDir, services::Se
 struct AppState {
     db_path: PathBuf,
     model: RwLock<Arc<stats::Model>>,
+    betting: RwLock<Arc<String>>,
     refreshing: AtomicBool,
 }
 type S = Arc<AppState>;
@@ -30,7 +32,34 @@ fn rebuild(st: &AppState) -> anyhow::Result<()> {
     let conn = db::open(&st.db_path)?;
     let m = stats::build(&conn)?;
     *st.model.write().unwrap() = Arc::new(m);
+    rebuild_betting(st, &conn);
     Ok(())
+}
+
+fn rebuild_betting(st: &AppState, conn: &rusqlite::Connection) {
+    match betting::build(conn) {
+        Ok(b) => *st.betting.write().unwrap() = Arc::new(b),
+        Err(e) => eprintln!("betting build failed: {e:#}"),
+    }
+}
+
+/// Light refresh of today's/tomorrow's scoreboard (lines move during the day).
+fn spawn_lines_refresh(st: S) {
+    if st.refreshing.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        match db::open(&st.db_path).and_then(|mut c| fetch::run_lines(&mut c).map(|_| c)) {
+            Ok(c) => {
+                if let Ok(m) = stats::build(&c) {
+                    *st.model.write().unwrap() = Arc::new(m);
+                }
+                rebuild_betting(&st, &c);
+            }
+            Err(e) => eprintln!("lines refresh failed: {e:#}"),
+        }
+        st.refreshing.store(false, Ordering::SeqCst);
+    });
 }
 
 fn spawn_refresh(st: S, full: bool) -> bool {
@@ -71,6 +100,9 @@ async fn games(State(s): State<S>) -> Response {
 }
 async fn elo(State(s): State<S>) -> Response {
     json_str(&s.model.read().unwrap().elo_json)
+}
+async fn betting_api(State(s): State<S>) -> Response {
+    json_str(&s.betting.read().unwrap().clone())
 }
 async fn refresh(State(s): State<S>) -> Response {
     let started = spawn_refresh(s, false);
@@ -217,12 +249,36 @@ fn main() -> anyhow::Result<()> {
         eprintln!("model built; updated {}", m.updated);
         return Ok(());
     }
+    if args.get(1).map(|s| s.as_str()) == Some("tune") {
+        return betting::tune(&db::open(&db_path)?);
+    }
+    if args.get(1).map(|s| s.as_str()) == Some("betting") {
+        let out = betting::build(&db::open(&db_path)?)?;
+        println!("{out}");
+        return Ok(());
+    }
 
     seed_db(&db_path);
     let conn = db::open(&db_path)?;
     let model = stats::build(&conn)?;
+    let st: S = Arc::new(AppState {
+        db_path,
+        model: RwLock::new(Arc::new(model)),
+        betting: RwLock::new(Arc::new("{}".into())),
+        refreshing: AtomicBool::new(false),
+    });
+    rebuild_betting(&st, &conn);
     drop(conn);
-    let st: S = Arc::new(AppState { db_path, model: RwLock::new(Arc::new(model)), refreshing: AtomicBool::new(false) });
+
+    // Lines move during the day: re-pull yesterday..tomorrow's scoreboard every LINES_MINUTES (default 60, 0 = off).
+    let lm = std::env::var("LINES_MINUTES").ok().and_then(|x| x.parse::<u64>().ok()).unwrap_or(60);
+    if lm > 0 {
+        let st4 = st.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(lm * 60));
+            spawn_lines_refresh(st4.clone());
+        });
+    }
 
     // Refresh once on start (picks up any games since the seed), and every REFRESH_HOURS if set.
     if std::env::var("NO_STARTUP_REFRESH").is_err() {
@@ -267,6 +323,7 @@ fn main() -> anyhow::Result<()> {
         .route("/api/players", get(players))
         .route("/api/games", get(games))
         .route("/api/elo", get(elo))
+        .route("/api/betting", get(betting_api))
         .route("/api/game/{id}", get(game_box))
         .route("/api/player/{id}/log", get(player_log))
         .route("/api/refresh", post(refresh))

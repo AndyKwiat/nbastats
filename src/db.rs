@@ -41,6 +41,20 @@ CREATE TABLE IF NOT EXISTS player_games (
   PRIMARY KEY (game_id, player_id)
 );
 CREATE INDEX IF NOT EXISTS pg_player ON player_games(player_id);
+-- betting lines (one provider per game; spread is the HOME team's line, negative = home favoured)
+CREATE TABLE IF NOT EXISTS odds (
+  game_id TEXT PRIMARY KEY, provider TEXT, spread REAL, total REAL, ml_home INTEGER, ml_away INTEGER,
+  spread_open REAL, total_open REAL, ml_home_open INTEGER, ml_away_open INTEGER, updated TEXT
+);
+CREATE TABLE IF NOT EXISTS odds_open_checked (game_id TEXT PRIMARY KEY);
+-- prior regular seasons (training data for the betting models only)
+CREATE TABLE IF NOT EXISTS hist_games (
+  id TEXT PRIMARY KEY, season INTEGER, date TEXT, home_id TEXT, away_id TEXT,
+  home_score INTEGER, away_score INTEGER, periods INTEGER, neutral INTEGER,
+  h_fgm INTEGER, h_fga INTEGER, h_fta INTEGER, h_oreb INTEGER, h_dreb INTEGER, h_tov INTEGER,
+  a_fgm INTEGER, a_fga INTEGER, a_fta INTEGER, a_oreb INTEGER, a_dreb INTEGER, a_tov INTEGER,
+  fetched INTEGER DEFAULT 0
+);
 "#,
     )?;
     Ok(conn)

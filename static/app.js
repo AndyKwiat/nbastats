@@ -137,7 +137,7 @@ const cTeam = { k: 'display', l: 'Team', cls: 'l stick', asc: true, v: r => r.di
 const routes = [
   [/^#\/?$/, home], [/^#\/standings/, standings], [/^#\/leaders/, leaders], [/^#\/players(?:\?(.*))?$/, players],
   [/^#\/player\/(\w+)/, player], [/^#\/teams(?:\?(.*))?$/, teams], [/^#\/team\/(\w+)/, team],
-  [/^#\/games(?:\/([\d-]+))?/, games], [/^#\/game\/(\w+)/, game], [/^#\/rankings/, rankings], [/^#\/charts/, charts],
+  [/^#\/games(?:\/([\d-]+))?/, games], [/^#\/game\/(\w+)/, game], [/^#\/rankings/, rankings], [/^#\/charts/, charts], [/^#\/betting/, betting],
 ];
 let cleanup = [];
 async function route() {
@@ -783,6 +783,189 @@ function lineChart(el, o) {
   };
   draw();
   const ro = new ResizeObserver(debounce(draw, 150)); ro.observe(el); cleanup.push(() => ro.disconnect());
+}
+
+
+// ---------- BETTING ----------
+const MCOL = ['#8a94a6', '#4c9bff', '#b07cff', '#2fd27a', '#ff6b2c', '#f5c542', '#ff5ea8', '#14b8a6'];
+let BET = null, betModel = 7, betSeason = null, betOpen = false;
+const abbr = id => T[id]?.abbr || '?';
+function lineTxt(g, s) {
+  if (s == null) return '–';
+  if (s === 0) return 'PK';
+  return s < 0 ? `${abbr(g.home)} ${s.toFixed(1)}` : `${abbr(g.away)} -${s.toFixed(1)}`;
+}
+const mlTxt = v => v == null ? '–' : (v > 0 ? '+' : '') + v;
+const pct = v => (v * 100).toFixed(1) + '%';
+function atsPick(g, m) {
+  const s = g.line?.spread; if (s == null) return null;
+  const e = m + s; if (e === 0) return null;
+  return e > 0 ? { side: g.home, txt: `${abbr(g.home)} ${s > 0 ? '+' : ''}${s === 0 ? 'PK' : s.toFixed(1)}`, edge: Math.abs(e) }
+    : { side: g.away, txt: `${abbr(g.away)} ${-s > 0 ? '+' : ''}${s === 0 ? 'PK' : (-s).toFixed(1)}`, edge: Math.abs(e) };
+}
+function ouPick(g, t) {
+  const L = g.line?.total; if (L == null) return null;
+  const e = t - L; if (e === 0) return null;
+  return { over: e > 0, txt: `${e > 0 ? 'Over' : 'Under'} ${L}`, edge: Math.abs(e) };
+}
+const recTxt = r => r.w + r.l === 0 ? '–' : `${r.w}-${r.l}${r.p ? '-' + r.p : ''}`;
+function recCell(r) {
+  if (!r || r.w + r.l === 0) return '<span class="muted">–</span>';
+  const p = r.w / (r.w + r.l);
+  return `<span class="${p > 0.524 ? 'pos' : p < 0.476 ? 'neg' : ''}"><b>${(p * 100).toFixed(1)}%</b></span> <span class="muted">${recTxt(r)} · ${r.units > 0 ? '+' : ''}${r.units.toFixed(1)}u</span>`;
+}
+
+function betCard(g) {
+  const h = T[g.home], a = T[g.away], L = g.line, P = g.p[betModel];
+  const t = new Date(g.date);
+  const when = t.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) + ' · ' + t.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const fav = P[0] >= 0 ? h : a;
+  const ap = atsPick(g, P[0]), op = ouPick(g, P[1]);
+  const mv = (o, c, f) => o != null && c != null && o !== c ? `<span class="muted"> (open ${f(o)})</span>` : '';
+  const lineRow = L ? `<div class="bl">
+      <div><span class="k">Spread</span><b>${lineTxt(g, L.spread)}</b>${mv(L.spread_open, L.spread, x => lineTxt(g, x))}</div>
+      <div><span class="k">Total</span><b>${L.total ?? '–'}</b>${mv(L.total_open, L.total, x => x)}</div>
+      <div><span class="k">Moneyline</span><b>${abbr(g.away)} ${mlTxt(L.mla)} / ${abbr(g.home)} ${mlTxt(L.mlh)}</b></div>
+    </div>` : `<div class="bl muted">No line posted yet (ESPN/DraftKings lines usually appear the day before).</div>`;
+  let impl = '';
+  if (L?.mlh != null && L?.mla != null) {
+    const ih = L.mlh < 0 ? -L.mlh / (-L.mlh + 100) : 100 / (L.mlh + 100), ia = L.mla < 0 ? -L.mla / (-L.mla + 100) : 100 / (L.mla + 100);
+    impl = ` · market ${abbr(g.home)} ${pct(ih / (ih + ia))}`;
+  }
+  const models = BET.models.map((m, i) => {
+    const q = g.p[i], ap2 = atsPick(g, q[0]), op2 = ouPick(g, q[1]);
+    return `<tr class="${i === betModel ? 'sel' : ''}"><td class="l"><span class="dot" style="background:${MCOL[i]}"></span>${esc(m.name)}</td><td>${q[0] >= 0 ? abbr(g.home) : abbr(g.away)} -${Math.abs(q[0]).toFixed(1)}</td><td>${q[1].toFixed(1)}</td><td>${pct(q[2])}</td><td class="l">${ap2 ? `${ap2.txt} <span class="muted">${ap2.edge.toFixed(1)}</span>` : '–'}</td><td class="l">${op2 ? `${op2.txt} <span class="muted">${op2.edge.toFixed(1)}</span>` : '–'}</td></tr>`;
+  }).join('');
+  return `<div class="card bc">
+    <div class="bh"><a href="#/team/${a.id}">${logoImg(a, 60)}</a><div class="mid"><div class="cond m">${esc(a.abbr)} <span class="muted">@</span> ${esc(h.abbr)}</div><div class="sub">${when}</div></div><a href="#/team/${h.id}">${logoImg(h, 60)}</a></div>
+    ${lineRow}
+    <div class="bp">
+      <div><span class="k">${esc(BET.models[betModel].name)}</span><b>${esc(fav.abbr)} by ${Math.abs(P[0]).toFixed(1)}</b> · total ${P[1].toFixed(1)} · ${esc(h.abbr)} win ${pct(P[2])}${impl}</div>
+      <div class="picks">${ap ? `<span class="pick ${ap.edge >= 3 ? 'strong' : ''}">ATS: ${ap.txt} <small>edge ${ap.edge.toFixed(1)}</small></span>` : ''}${op ? `<span class="pick ${op.edge >= 3 ? 'strong' : ''}">${op.txt} <small>edge ${op.edge.toFixed(1)}</small></span>` : ''}</div>
+    </div>
+    <details><summary>All models</summary><div class="tw"><table class="t sm"><thead><tr><th class="l">Model</th><th>Spread</th><th>Total</th><th>${esc(h.abbr)} win</th><th class="l">ATS pick</th><th class="l">O/U pick</th></tr></thead><tbody>${models}</tbody></table></div></details>
+  </div>`;
+}
+
+function multiLine(el, o) {
+  const draw = () => {
+    const W = Math.max(300, el.clientWidth || 600), H = o.height || 320, small = W < 560;
+    const m = { l: 46, r: 14, t: 10, b: 30 };
+    const all = o.series.flatMap(s => s.pts);
+    if (!all.length) { el.innerHTML = '<div class="muted">No data yet</div>'; return; }
+    const xs = o.xs; // array of x keys (ordered)
+    const xi = new Map(xs.map((x, i) => [x, i]));
+    let y0 = Math.min(o.yRef ?? Infinity, ...all.map(p => p[1])), y1 = Math.max(o.yRef ?? -Infinity, ...all.map(p => p[1]));
+    const pad = (y1 - y0) * 0.08 || 1; y0 -= pad; y1 += pad;
+    const sx = x => m.l + xi.get(x) / Math.max(1, xs.length - 1) * (W - m.l - m.r);
+    const sy = v => H - m.b - (v - y0) / (y1 - y0) * (H - m.t - m.b);
+    let s = `<svg viewBox="0 0 ${W} ${H}"><g class="grid">`;
+    niceTicks(y0, y1, 5).forEach(v => { s += `<line x1="${m.l}" x2="${W - m.r}" y1="${sy(v)}" y2="${sy(v)}"/><text x="${m.l - 6}" y="${sy(v) + 4}" text-anchor="end">${o.yf ? o.yf(v) : v}</text>`; });
+    const step = Math.ceil(xs.length / (small ? 4 : 8));
+    xs.forEach((x, i) => { if (i % step === 0 || o.allTicks) s += `<text x="${sx(x)}" y="${H - 8}" text-anchor="middle">${o.xf ? o.xf(x) : x}</text>`; });
+    s += '</g>';
+    if (o.yRef != null) s += `<line class="ref" x1="${m.l}" x2="${W - m.r}" y1="${sy(o.yRef)}" y2="${sy(o.yRef)}"/>`;
+    const anyHot = o.hot && o.hot.size;
+    for (const se of o.series) {
+      const hot = !anyHot || o.hot.has(se.key);
+      const d = se.pts.map((p, i) => `${i ? 'L' : 'M'}${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join('');
+      s += `<path class="line" d="${d}" stroke="${se.color}" style="opacity:${hot ? 1 : .12};stroke-width:${hot ? 2.2 : 1.2}"/>`;
+      if (o.dots) se.pts.forEach(p => { s += `<circle cx="${sx(p[0])}" cy="${sy(p[1])}" r="3" fill="${se.color}" style="opacity:${hot ? 1 : .15}"/>`; });
+    }
+    s += `<line class="xh ref" y1="${m.t}" y2="${H - m.b}" x1="-10" x2="-10"/></svg>`;
+    el.innerHTML = `<div class="chart">${s}</div>`;
+    const svg = $('svg', el), xh = $('.xh', el);
+    svg.onmousemove = svg.ontouchstart = e => {
+      const pt = e.touches ? e.touches[0] : e;
+      const r = svg.getBoundingClientRect(), x = (pt.clientX - r.left) * W / r.width;
+      let best = xs[0]; for (const k of xs) if (Math.abs(sx(k) - x) < Math.abs(sx(best) - x)) best = k;
+      xh.setAttribute('x1', sx(best)); xh.setAttribute('x2', sx(best));
+      const rows = o.series.filter(se => !anyHot || o.hot.has(se.key)).map(se => { let v = null; for (const p of se.pts) if (xi.get(p[0]) <= xi.get(best)) v = p[1]; return [se, v]; })
+        .filter(x => x[1] != null).sort((a, b) => b[1] - a[1]);
+      showTip(`<b>${o.xf ? o.xf(best) : best}</b>${tipRows(rows.map(([se, v]) => [`<span style="color:${se.color}">●</span> ${esc(se.name)}`, o.yf ? o.yf(v) : v]))}`, pt.clientX, pt.clientY);
+    };
+    svg.onmouseleave = () => { hideTip(); xh.setAttribute('x1', -10); xh.setAttribute('x2', -10); };
+  };
+  draw();
+  const ro = new ResizeObserver(debounce(draw, 150)); ro.observe(el); cleanup.push(() => ro.disconnect());
+}
+
+async function betting() {
+  BET = await api('betting');
+  if (!BET.models) { app.innerHTML = '<div class="loading">Betting models are still being computed — try again in a minute.</div>'; return; }
+  const B = BET;
+  const seasons = B.backtest.map(b => b.season);
+  if (betSeason == null || !seasons.includes(betSeason)) betSeason = seasons[seasons.length - 1];
+  const cnt = B.counts.by_season.map(s => `${s.season - 1}-${String(s.season % 100).padStart(2, '0')}: ${s.games} games${s.lines ? `, ${s.lines} with lines` : ''}`).join(' · ');
+  app.innerHTML = `<div class="pagehead"><div><h1>Betting Lab</h1><p>DraftKings lines (via ESPN) vs. eight prediction models, plus an honest walk-forward backtest against closing lines.</p></div>
+      <div class="controls"><select id="bm">${B.models.map((m, i) => `<option value="${i}" ${i === betModel ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></div></div>
+    <h2>Upcoming games with lines</h2><div class="grid g2" id="up"></div><div id="up2"></div>
+    <div class="card mt"><div class="hd"><h2>Backtest vs real lines</h2><div class="controls"><div class="seg" id="bo"><button data-o="0" class="${betOpen ? '' : 'on'}">vs closing</button><button data-o="1" class="${betOpen ? 'on' : ''}">vs opening</button></div><div class="seg" id="bs">${B.backtest.map(b => `<button data-s="${b.season}" class="${b.season === betSeason ? 'on' : ''}">${b.label}</button>`).join('')}</div></div></div>
+      <p class="chart-desc">Every prediction made only from games on <i>earlier days</i>. ATS/O-U columns: picking the side the model prefers vs the closing (or opening) line (all games, then only when the model disagrees by 3+ / 6+ points), units at -110. Break-even is 52.4%. ML: betting the model's side when its win probability beats the no-vig market by 3+ points, at the actual moneyline.</p>
+      <div id="bt"></div></div>
+    <div class="grid g2 mt">
+      <div class="card"><h2>Cumulative ATS profit</h2><p class="chart-desc">Units won betting every game against the spread at -110, by model (${esc(B.backtest.map(b => b.label).join(' + '))}). Tap a model to highlight.</p><div id="cu"></div><div class="legend" id="cul"></div></div>
+      <div class="card"><h2>Does recency matter?</h2><p class="chart-desc">Margin error of the rating models vs how fast old games fade (half-life in days; "∞" = every game counts equally). Lower is better. Games with lines only.</p><div id="rc"></div><div id="rct"></div></div>
+    </div>
+    <div class="card mt"><div class="hd"><h2>Recent results</h2><span class="sub">selected model vs closing line</span></div><div id="rr"></div></div>
+    <div class="card mt"><h2>Models</h2><div class="tw"><table class="t"><tbody>${B.models.map((m, i) => `<tr><td class="l"><span class="dot" style="background:${MCOL[i]}"></span><b>${esc(m.name)}</b></td><td class="l wrap">${esc(m.desc)}</td></tr>`).join('')}</tbody></table></div>
+      <p class="chart-desc mt"><b>No peeking:</b> games are processed one calendar day at a time; all predictions for a day are made before any of that day's results are added. Ratings are re-fit every day from earlier games only; ridge / neural-net models are trained only on earlier games' features and outcomes (feature scaling also from that training set), retrained weekly. Hyper-parameters (Elo K, half-life, ridge penalties) were tuned on 2024-25 only, which has no lines and isn't in this backtest. Training data: ${cnt}.</p>
+      <p class="chart-desc">For fun / research only. Even good models rarely beat closing lines after the vig.</p></div>`;
+  $('#bm').onchange = e => { betModel = +e.target.value; drawUp(); drawRecent(); };
+  const drawUp = () => {
+    const lined = B.upcoming.filter(g => g.line), rest = B.upcoming.filter(g => !g.line);
+    $('#up').innerHTML = lined.length ? lined.map(betCard).join('') : '<div class="card muted">No lines posted right now — ESPN/DraftKings lines usually appear the day before tip-off. Model predictions for the week are below.</div>';
+    const q = i => g => g.p[betModel][i];
+    $('#up2').innerHTML = rest.length ? `<div class="card flush mt"><div class="hd"><h3>Later this week · model only (no line yet)</h3></div><div class="tw"><table class="t sm"><thead><tr><th class="l">Date</th><th class="l">Game</th><th>Model spread</th><th>Model total</th><th>Home win</th></tr></thead><tbody>${rest.map(g => `<tr><td class="l">${dayLabel(g.day)}</td><td class="l">${esc(abbr(g.away))} @ ${esc(abbr(g.home))}</td><td>${q(0)(g) >= 0 ? abbr(g.home) : abbr(g.away)} -${Math.abs(q(0)(g)).toFixed(1)}</td><td>${q(1)(g).toFixed(1)}</td><td>${pct(q(2)(g))}</td></tr>`).join('')}</tbody></table></div></div>` : '';
+  };
+  const drawBt = () => {
+    const bt = B.backtest.find(b => b.season === betSeason);
+    const row = (name, color, a, i) => `<tr class="${i === betModel ? 'sel' : ''}"><td class="l stick">${color ? `<span class="dot" style="background:${color}"></span>` : ''}<b>${esc(name)}</b></td>
+      <td>${a.n}</td><td>${a.mae.toFixed(2)}</td><td>${a.tmae.toFixed(2)}</td><td>${pct(a.su)}</td>
+      ${i < 0 ? `<td colspan="7" class="l muted">benchmark: the ${betOpen ? 'opening' : 'closing'} line itself</td>` : `
+      <td>${recCell(a.ats[0])}</td><td>${recCell(a.ats[1])}</td><td>${recCell(a.ats[2])}</td>
+      <td>${recCell(a.ou[0])}</td><td>${recCell(a.ou[1])}</td><td>${recCell(a.ou[2])}</td>
+      <td>${a.ml.n ? `<span class="${a.ml.units > 0 ? 'pos' : 'neg'}"><b>${a.ml.units > 0 ? '+' : ''}${a.ml.units.toFixed(1)}u</b></span> <span class="muted">${a.ml.w}/${a.ml.n}</span>` : '–'}</td>`}</tr>`;
+    const mk = betOpen ? bt.market_open : bt.market, ms = betOpen ? bt.models_open : bt.models;
+    $('#bt').innerHTML = `<div class="tw"><table class="t bt"><thead><tr><th class="l stick">Model</th><th title="games with a closing line">N</th><th title="mean absolute error of predicted margin">Margin MAE</th><th title="mean absolute error of predicted total">Total MAE</th><th title="straight-up winner accuracy">SU</th>
+      <th>ATS all</th><th>ATS 3+</th><th>ATS 6+</th><th>O/U all</th><th>O/U 3+</th><th>O/U 6+</th><th>ML</th></tr></thead>
+      <tbody>${row(betOpen ? 'Opening line' : 'Closing line', null, mk, -1)}${ms.map((a, i) => row(B.models[i].name, MCOL[i], a, i)).join('')}</tbody></table></div>`;
+  };
+  const hot = new Set([betModel]);
+  const drawCum = () => {
+    const days = [...new Set(B.series.flatMap(s => s.map(p => p[0])))].sort();
+    multiLine($('#cu'), { xs: days, xf: d => dayLabel(d, { month: 'short', day: 'numeric', year: '2-digit' }), yRef: 0, hot, yf: v => (v > 0 ? '+' : '') + (+v).toFixed(0),
+      series: B.series.map((s, i) => ({ key: i, name: B.models[i].name, color: MCOL[i], pts: s })) });
+    $('#cul').innerHTML = B.models.map((m, i) => `<button data-i="${i}" class="${hot.has(i) ? 'on' : ''}"><span class="dot" style="background:${MCOL[i]}"></span>${esc(m.name)} ${(() => { const s = B.series[i]; const v = s.length ? s[s.length - 1][1] : 0; return `<b class="${v > 0 ? 'pos' : 'neg'}">${v > 0 ? '+' : ''}${v.toFixed(1)}</b>`; })()}</button>`).join('');
+  };
+  $('#cul').onclick = e => { const b = e.target.closest('button'); if (!b) return; const i = +b.dataset.i; hot.has(i) ? hot.delete(i) : hot.add(i); drawCum(); };
+  const drawRec = () => {
+    const xs = B.recency.map(r => r.hl == null ? '∞' : String(r.hl));
+    multiLine($('#rc'), { xs, allTicks: true, dots: true, height: 260, yf: v => (+v).toFixed(2),
+      series: [{ key: 'srs', name: 'SRS margin MAE', color: MCOL[3], pts: B.recency.map((r, i) => [xs[i], r.srs]) },
+               { key: 'eff', name: 'Efficiency margin MAE', color: MCOL[4], pts: B.recency.map((r, i) => [xs[i], r.eff]) }] });
+    const best = B.recency.reduce((a, r) => r.eff < a.eff ? r : a);
+    const inf = B.recency.find(r => r.hl == null);
+    $('#rct').innerHTML = `<p class="chart-desc">Best half-life here: <b>${best.hl ?? '∞'} days</b> (eff MAE ${best.eff.toFixed(2)} vs ${inf.eff.toFixed(2)} with no recency). The live models use ${B.params.hl} days, chosen on 2024-25.</p>`;
+  };
+  const drawRecent = () => {
+    const rows = B.recent.slice(0, 80).map(g => {
+      const q = g.p[betModel], am = g.hs - g.as, at = g.hs + g.as;
+      const ap = atsPick(g, q[0]), op = ouPick(g, q[1]);
+      const s = g.line?.spread;
+      let ar = '–', or = '–';
+      if (ap) { const res = am + s; ar = res === 0 ? '<span class="muted">push</span>' : ((res > 0) === (ap.side === g.home) ? '<span class="pos">✓</span>' : '<span class="neg">✗</span>'); ar = `${ap.txt} ${ar}`; }
+      if (op) { const res = at - g.line.total; or = res === 0 ? '<span class="muted">push</span>' : ((res > 0) === op.over ? '<span class="pos">✓</span>' : '<span class="neg">✗</span>'); or = `${op.txt} ${or}`; }
+      return `<tr><td class="l">${dayLabel(g.day, { month: 'short', day: 'numeric' })}</td><td class="l"><a href="#/game/${g.id}">${esc(abbr(g.away))} ${g.as} @ ${esc(abbr(g.home))} ${g.hs}</a></td>
+        <td>${lineTxt(g, s)}</td><td>${g.line?.total ?? '–'}</td><td>${q[0] >= 0 ? abbr(g.home) : abbr(g.away)} -${Math.abs(q[0]).toFixed(1)}</td><td>${q[1].toFixed(1)}</td><td class="l">${ar}</td><td class="l">${or}</td></tr>`;
+    }).join('');
+    $('#rr').innerHTML = `<div class="tw"><table class="t sm"><thead><tr><th class="l">Date</th><th class="l">Final</th><th>Line</th><th>O/U</th><th>Model</th><th>Model tot.</th><th class="l">ATS pick</th><th class="l">O/U pick</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  };
+  $('#bo').onclick = e => { const b = e.target.closest('button'); if (!b) return; betOpen = b.dataset.o === '1'; $('#bo').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); drawBt(); };
+  $('#bs').onclick = e => { const b = e.target.closest('button'); if (!b) return; betSeason = +b.dataset.s; $('#bs').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b)); drawBt(); };
+  const oldBm = $('#bm').onchange;
+  $('#bm').onchange = e => { oldBm(e); drawBt(); hot.clear(); hot.add(betModel); drawCum(); };
+  drawUp(); drawBt(); drawCum(); drawRec(); drawRecent();
 }
 
 // ---------- boot ----------

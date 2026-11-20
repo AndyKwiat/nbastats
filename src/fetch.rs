@@ -75,8 +75,15 @@ pub fn run(conn: &mut Connection, full: bool) -> Result<()> {
     let t0 = std::time::Instant::now();
     fetch_teams(&c, conn)?;
     fetch_rosters(&c, conn)?;
-    fetch_schedule(&c, conn)?;
+    let start = NaiveDate::parse_from_str(SEASON_START, "%Y-%m-%d")?;
+    fetch_schedule(&c, conn, start, Utc::now().date_naive() + Duration::days(7))?;
     let n = fetch_boxscores(&c, conn, full)?;
+    if let Err(e) = fetch_history(&c, conn) {
+        eprintln!("history fetch: {e:#}");
+    }
+    if let Err(e) = fetch_open_lines(&c, conn) {
+        eprintln!("opening lines: {e:#}");
+    }
     conn.execute(
         "INSERT OR REPLACE INTO meta(key,value) VALUES('updated', ?1)",
         params![Utc::now().to_rfc3339()],
@@ -153,9 +160,111 @@ fn fetch_rosters(c: &Client, conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn fetch_schedule(c: &Client, conn: &Connection) -> Result<()> {
-    let start = NaiveDate::parse_from_str(SEASON_START, "%Y-%m-%d")?;
-    let end = Utc::now().date_naive() + Duration::days(7);
+/// Light refresh: scoreboard for yesterday..tomorrow (statuses, scores, current lines).
+pub fn run_lines(conn: &mut Connection) -> Result<()> {
+    let c = Client::new();
+    let today = (Utc::now() - Duration::hours(5)).date_naive();
+    fetch_schedule(&c, conn, today - Duration::days(1), today + Duration::days(1))?;
+    fetch_boxscores(&c, conn, false)?;
+    Ok(())
+}
+
+fn fnum(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        Value::String(x) => {
+            let t = x.trim().trim_start_matches(|ch: char| ch == 'o' || ch == 'u' || ch == '+');
+            if t.eq_ignore_ascii_case("even") || t.eq_ignore_ascii_case("pk") {
+                Some(0.0)
+            } else {
+                t.parse().ok()
+            }
+        }
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upsert_odds(
+    conn: &Connection,
+    gid: &str,
+    provider: &str,
+    spread: Option<f64>,
+    total: Option<f64>,
+    mlh: Option<f64>,
+    mla: Option<f64>,
+    open: [Option<f64>; 4],
+) -> Result<()> {
+    let mi = |x: Option<f64>| x.map(|v| v as i64);
+    conn.execute(
+        "INSERT INTO odds(game_id,provider,spread,total,ml_home,ml_away,spread_open,total_open,ml_home_open,ml_away_open,updated)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+         ON CONFLICT(game_id) DO UPDATE SET
+           provider=COALESCE(excluded.provider,provider), spread=COALESCE(excluded.spread,spread),
+           total=COALESCE(excluded.total,total), ml_home=COALESCE(excluded.ml_home,ml_home),
+           ml_away=COALESCE(excluded.ml_away,ml_away), spread_open=COALESCE(spread_open,excluded.spread_open),
+           total_open=COALESCE(total_open,excluded.total_open), ml_home_open=COALESCE(ml_home_open,excluded.ml_home_open),
+           ml_away_open=COALESCE(ml_away_open,excluded.ml_away_open), updated=excluded.updated",
+        params![
+            gid,
+            if provider.is_empty() { None } else { Some(provider) },
+            spread,
+            total,
+            mi(mlh),
+            mi(mla),
+            open[0],
+            open[1],
+            mi(open[2]),
+            mi(open[3]),
+            Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+/// Lines from a scoreboard competition (`competitions[0].odds[0]`), upcoming games only.
+fn store_scoreboard_odds(conn: &Connection, gid: &str, o: &Value) -> Result<()> {
+    if o.is_null() || fnum(&o["overUnder"]).is_none() && fnum(&o["spread"]).is_none() {
+        return Ok(());
+    }
+    upsert_odds(
+        conn,
+        gid,
+        &s(&o["provider"]["name"]),
+        fnum(&o["spread"]),
+        fnum(&o["overUnder"]),
+        fnum(&o["moneyline"]["home"]["close"]["odds"]),
+        fnum(&o["moneyline"]["away"]["close"]["odds"]),
+        [
+            fnum(&o["pointSpread"]["home"]["open"]["line"]),
+            fnum(&o["total"]["over"]["open"]["line"]),
+            fnum(&o["moneyline"]["home"]["open"]["odds"]),
+            fnum(&o["moneyline"]["away"]["open"]["odds"]),
+        ],
+    )
+}
+
+/// Closing lines from a game summary's `pickcenter`. Always writes a row (possibly empty) so the
+/// game isn't re-requested just for odds.
+fn store_pickcenter(conn: &Connection, gid: &str, v: &Value) -> Result<()> {
+    let pc = v["pickcenter"].as_array().cloned().unwrap_or_default();
+    let o = pc.iter().find(|o| fnum(&o["spread"]).is_some() || fnum(&o["overUnder"]).is_some());
+    match o {
+        Some(o) => upsert_odds(
+            conn,
+            gid,
+            &s(&o["provider"]["name"]),
+            fnum(&o["spread"]),
+            fnum(&o["overUnder"]),
+            fnum(&o["homeTeamOdds"]["moneyLine"]),
+            fnum(&o["awayTeamOdds"]["moneyLine"]),
+            [None; 4],
+        ),
+        None => upsert_odds(conn, gid, "", None, None, None, None, [None; 4]),
+    }
+}
+
+fn fetch_schedule(c: &Client, conn: &Connection, start: NaiveDate, end: NaiveDate) -> Result<()> {
     let mut d = start;
     while d <= end {
         let url = format!("{BASE}/scoreboard?dates={}", d.format("%Y%m%d"));
@@ -200,6 +309,9 @@ fn fetch_schedule(c: &Client, conn: &Connection) -> Result<()> {
                     comp["neutralSite"].as_bool().unwrap_or(false) as i64
                 ],
             )?;
+            if status == "STATUS_SCHEDULED" {
+                store_scoreboard_odds(conn, &s(&e["id"]), &comp["odds"][0])?;
+            }
         }
         d += Duration::days(1);
         std::thread::sleep(StdDuration::from_millis(100));
@@ -211,7 +323,7 @@ fn fetch_boxscores(c: &Client, conn: &mut Connection, full: bool) -> Result<usiz
     let q = if full {
         "SELECT id FROM games WHERE status='STATUS_FINAL' ORDER BY date"
     } else {
-        "SELECT id FROM games WHERE status='STATUS_FINAL' AND fetched=0 ORDER BY date"
+        "SELECT id FROM games WHERE status='STATUS_FINAL' AND (fetched=0 OR id NOT IN (SELECT game_id FROM odds)) ORDER BY date"
     };
     let ids: Vec<String> = conn.prepare(q)?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
     let total = ids.len();
@@ -319,6 +431,143 @@ fn store_summary(tx: &rusqlite::Transaction, gid: &str, v: &Value) -> Result<()>
             )?;
         }
     }
+    store_pickcenter(tx, gid, v)?;
     tx.execute("UPDATE games SET fetched=1 WHERE id=?1", [gid])?;
+    Ok(())
+}
+
+/// Opening lines for finished games (ESPN core API), once per game.
+fn fetch_open_lines(c: &Client, conn: &Connection) -> Result<()> {
+    let ids: Vec<String> = conn
+        .prepare(
+            "SELECT o.game_id FROM odds o
+             WHERE o.spread IS NOT NULL AND o.spread_open IS NULL
+               AND o.game_id NOT IN (SELECT game_id FROM odds_open_checked)
+               AND (o.game_id IN (SELECT id FROM hist_games) OR o.game_id IN (SELECT id FROM games WHERE status='STATUS_FINAL'))",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    let total = ids.len();
+    for (n, gid) in ids.iter().enumerate() {
+        let url = format!("https://sports.core.api.espn.com/v2/sports/basketball/leagues/nba/events/{gid}/competitions/{gid}/odds");
+        let v = match c.get(&url) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("open odds {gid}: {e}");
+                continue;
+            }
+        };
+        let items = v["items"].as_array().cloned().unwrap_or_default();
+        if let Some(o) = items.iter().find(|o| !o["homeTeamOdds"]["open"]["pointSpread"]["american"].is_null()) {
+            conn.execute(
+                "UPDATE odds SET spread_open=?2, total_open=?3, ml_home_open=?4, ml_away_open=?5 WHERE game_id=?1",
+                params![
+                    gid,
+                    fnum(&o["homeTeamOdds"]["open"]["pointSpread"]["american"]),
+                    fnum(&o["open"]["total"]["american"]),
+                    fnum(&o["homeTeamOdds"]["open"]["moneyLine"]["american"]).map(|x| x as i64),
+                    fnum(&o["awayTeamOdds"]["open"]["moneyLine"]["american"]).map(|x| x as i64),
+                ],
+            )?;
+        }
+        conn.execute("INSERT OR IGNORE INTO odds_open_checked VALUES (?1)", [gid])?;
+        if n % 100 == 0 {
+            eprintln!("opening lines {}/{}", n + 1, total);
+        }
+        std::thread::sleep(StdDuration::from_millis(60));
+    }
+    Ok(())
+}
+
+/// Prior regular seasons: (ESPN season year, first day, last day).
+const HIST: &[(i64, &str, &str)] = &[(2025, "2024-10-22", "2025-04-13"), (2026, "2025-10-21", "2026-04-12")];
+
+/// One-time pull of prior seasons' scores, team box basics and closing lines (for model training/backtests).
+fn fetch_history(c: &Client, conn: &mut Connection) -> Result<()> {
+    for &(year, a, b) in HIST {
+        let key = format!("hist_sched_{year}");
+        let done: Option<String> = conn.query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0)).ok();
+        if done.is_some() {
+            continue;
+        }
+        eprintln!("history: schedule {year}");
+        let mut d = NaiveDate::parse_from_str(a, "%Y-%m-%d")?;
+        let end = NaiveDate::parse_from_str(b, "%Y-%m-%d")?;
+        while d <= end {
+            let v = c.get(&format!("{BASE}/scoreboard?dates={}", d.format("%Y%m%d")))?;
+            for e in v["events"].as_array().cloned().unwrap_or_default() {
+                if e["season"]["year"].as_i64() != Some(year)
+                    || e["season"]["type"].as_i64() != Some(2)
+                    || s(&e["status"]["type"]["name"]) != "STATUS_FINAL"
+                {
+                    continue;
+                }
+                let comp = &e["competitions"][0];
+                let (mut h, mut aw) = ((String::new(), 0), (String::new(), 0));
+                for t in comp["competitors"].as_array().cloned().unwrap_or_default() {
+                    let x = (s(&t["team"]["id"]), i(&t["score"]));
+                    if s(&t["homeAway"]) == "home" {
+                        h = x
+                    } else {
+                        aw = x
+                    }
+                }
+                conn.execute(
+                    "INSERT OR IGNORE INTO hist_games(id,season,date,home_id,away_id,home_score,away_score,neutral)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                    params![s(&e["id"]), year, s(&e["date"]), h.0, aw.0, h.1, aw.1,
+                        comp["neutralSite"].as_bool().unwrap_or(false) as i64],
+                )?;
+            }
+            d += Duration::days(1);
+            std::thread::sleep(StdDuration::from_millis(80));
+        }
+        conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?1,'1')", [&key])?;
+    }
+    let ids: Vec<String> = conn
+        .prepare("SELECT id FROM hist_games WHERE fetched=0 ORDER BY date")?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    let total = ids.len();
+    for (n, gid) in ids.iter().enumerate() {
+        let v = match c.get(&format!("{BASE}/summary?event={gid}")) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("hist summary {gid}: {e}");
+                continue;
+            }
+        };
+        let tx = conn.transaction()?;
+        let comp = &v["header"]["competitions"][0];
+        let mut home_of: std::collections::HashMap<String, bool> = Default::default();
+        let mut periods = 4;
+        for t in comp["competitors"].as_array().cloned().unwrap_or_default() {
+            home_of.insert(s(&t["team"]["id"]), s(&t["homeAway"]) == "home");
+            periods = periods.max(t["linescores"].as_array().map(|l| l.len()).unwrap_or(4));
+        }
+        for t in v["boxscore"]["teams"].as_array().cloned().unwrap_or_default() {
+            let mut st: std::collections::HashMap<String, String> = Default::default();
+            for x in t["statistics"].as_array().cloned().unwrap_or_default() {
+                st.insert(s(&x["name"]), s(&x["displayValue"]));
+            }
+            let g = |k: &str| st.get(k).map(|x| i(&Value::String(x.clone()))).unwrap_or(0);
+            let (fgm, fga) = st.get("fieldGoalsMade-fieldGoalsAttempted").map(|x| pair(x)).unwrap_or((0, 0));
+            let (_, fta) = st.get("freeThrowsMade-freeThrowsAttempted").map(|x| pair(x)).unwrap_or((0, 0));
+            let p = if *home_of.get(&s(&t["team"]["id"])).unwrap_or(&false) { "h" } else { "a" };
+            tx.execute(
+                &format!(
+                    "UPDATE hist_games SET {p}_fgm=?2,{p}_fga=?3,{p}_fta=?4,{p}_oreb=?5,{p}_dreb=?6,{p}_tov=?7 WHERE id=?1"
+                ),
+                params![gid, fgm, fga, fta, g("offensiveRebounds"), g("defensiveRebounds"), g("totalTurnovers").max(g("turnovers"))],
+            )?;
+        }
+        store_pickcenter(&tx, gid, &v)?;
+        tx.execute("UPDATE hist_games SET fetched=1, periods=?2 WHERE id=?1", params![gid, periods as i64])?;
+        tx.commit()?;
+        if n % 50 == 0 {
+            eprintln!("history box scores {}/{}", n + 1, total);
+        }
+        std::thread::sleep(StdDuration::from_millis(100));
+    }
     Ok(())
 }

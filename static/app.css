@@ -244,3 +244,23 @@ img.hs { width: 40px; height: 40px; }
 .star .cat { font: 600 11px Inter; text-transform: uppercase; letter-spacing: .06em; color: var(--ink2); }
 .star .who { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 760px) { .g4 { grid-template-columns: minmax(0,1fr); } .star img { width: 76px; height: 55px; } }
+
+/* betting */
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
+.bc { display: flex; flex-direction: column; gap: 10px; }
+.bc .bh { display: flex; align-items: center; gap: 10px; }
+.bc .bh .logo { width: 40px; height: 40px; }
+.bc .bh .mid { flex: 1; text-align: center; }
+.bc .bh .m { font-size: 22px; font-weight: 700; }
+.bc .bl, .bc .bp { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; }
+.bc .bp { flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid var(--line); }
+.bc .k { display: block; color: var(--ink3); font: 700 10.5px Inter; text-transform: uppercase; letter-spacing: .05em; }
+.bc .picks { display: flex; flex-wrap: wrap; gap: 6px; }
+.pick { padding: 3px 9px; border-radius: 999px; background: var(--bg2); border: 1px solid var(--line); font-weight: 600; font-size: 12.5px; }
+.pick small { color: var(--ink3); font-weight: 500; }
+.pick.strong { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.bc details summary { cursor: pointer; color: var(--ink2); font-weight: 600; font-size: 12.5px; }
+.t.sm th, .t.sm td { padding: 5px 7px; font-size: 12.5px; }
+.t tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.t td.wrap { white-space: normal; min-width: 260px; color: var(--ink2); }
+.t.bt td { font-size: 12.5px; }
