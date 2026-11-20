@@ -122,7 +122,7 @@ async function load() {
     <button class="btn" id="refresh" style="margin-left:8px;padding:3px 9px;font-size:12px">Refresh data</button>`;
   $('#refresh').onclick = async () => {
     const r = await fetch('/api/refresh', { method: 'POST' }).then(r => r.json());
-    $('#refresh').textContent = r.started ? 'Refreshing… reload in a few minutes' : 'Already refreshing';
+    $('#refresh').textContent = r.started ? 'Refreshing… reload in ~30s' : 'Already refreshing';
   };
 }
 const teamGames = tid => D.games.filter(g => g.home === tid || g.away === tid);

@@ -15,4 +15,4 @@ DATA_DIR=./data STATIC_DIR=./static PORT=8080 ./target/release/app   # serve
 ```
 
 The server refreshes once on startup; `POST /api/refresh` (or the footer button) pulls new games.
-Set `REFRESH_HOURS=N` in the app env for periodic refreshes.
+It also refreshes daily at 03:00 US Pacific (`REFRESH_AT=HH:MM` to change, `off` to disable); `REFRESH_HOURS=N` adds an interval refresh.

@@ -159,6 +159,50 @@ fn seed_db(db_path: &std::path::Path) {
     }
 }
 
+/// US Pacific UTC offset (hours) for a local calendar date: PDT (-7) from the 2nd Sunday of March
+/// through the day before the 1st Sunday of November, else PST (-8). Valid for times after 2 am.
+fn pacific_offset(d: chrono::NaiveDate) -> i64 {
+    use chrono::{Datelike, NaiveDate};
+    let nth_sunday = |month: u32, n: u32| {
+        let first = NaiveDate::from_ymd_opt(d.year(), month, 1).unwrap();
+        let skip = (7 - first.weekday().num_days_from_sunday()) % 7;
+        first + chrono::Duration::days((skip + 7 * (n - 1)) as i64)
+    };
+    if d >= nth_sunday(3, 2) && d < nth_sunday(11, 1) { -7 } else { -8 }
+}
+
+/// Next UTC instant at which Pacific wall-clock time is h:m.
+fn next_pacific(now: chrono::DateTime<chrono::Utc>, h: u32, m: u32) -> chrono::DateTime<chrono::Utc> {
+    let today = (now + chrono::Duration::hours(-8)).date_naive();
+    for k in 0..3 {
+        let d = today + chrono::Duration::days(k);
+        let local = d.and_hms_opt(h, m, 0).unwrap();
+        let utc = (local - chrono::Duration::hours(pacific_offset(d))).and_utc();
+        if utc > now {
+            return utc;
+        }
+    }
+    now + chrono::Duration::hours(24)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    #[test]
+    fn schedule() {
+        let t = |s: &str| chrono::Utc.datetime_from_str(s, "%Y-%m-%d %H:%M").unwrap();
+        // Nov 20 2026 (PST): 3am PST = 11:00 UTC
+        assert_eq!(next_pacific(t("2026-11-20 05:00"), 3, 0), t("2026-11-20 11:00"));
+        assert_eq!(next_pacific(t("2026-11-20 11:01"), 3, 0), t("2026-11-21 11:00"));
+        // Summer (PDT): 3am PDT = 10:00 UTC
+        assert_eq!(next_pacific(t("2027-04-10 12:00"), 3, 0), t("2027-04-11 10:00"));
+        // DST starts Mar 14 2027; ends Nov 7 2027
+        assert_eq!(next_pacific(t("2027-03-13 12:00"), 3, 0), t("2027-03-14 10:00"));
+        assert_eq!(next_pacific(t("2027-11-06 12:00"), 3, 0), t("2027-11-07 11:00"));
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let dir = data_dir();
@@ -192,7 +236,29 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
-    let static_dir = PathBuf::from(std::env::var("STATIC_DIR").unwrap_or_else(|_| "static".into()));
+    // Daily refresh at a fixed US Pacific time (default 03:00; REFRESH_AT=HH:MM to change, "off" to disable).
+    let at = std::env::var("REFRESH_AT").unwrap_or_else(|_| "03:00".into());
+    if at != "off" {
+        if let Some((h, m)) = at.split_once(':').and_then(|(h, m)| Some((h.parse::<u32>().ok()?, m.parse::<u32>().ok()?))) {
+            let st3 = st.clone();
+            std::thread::spawn(move || loop {
+                let next = next_pacific(chrono::Utc::now(), h, m);
+                eprintln!("next scheduled refresh: {next}");
+                loop {
+                    let left = (next - chrono::Utc::now()).num_seconds();
+                    if left <= 0 {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(left.min(600) as u64));
+                }
+                eprintln!("scheduled refresh starting");
+                spawn_refresh(st3.clone(), false);
+                std::thread::sleep(std::time::Duration::from_secs(90));
+            });
+        }
+    }
+
+    let static_dir =PathBuf::from(std::env::var("STATIC_DIR").unwrap_or_else(|_| "static".into()));
     let index = static_dir.join("index.html");
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
