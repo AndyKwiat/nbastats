@@ -30,16 +30,16 @@ fn s(v: &Value) -> String {
     }
 }
 
-fn clock_secs(c: &str) -> f64 {
+pub fn clock_secs(c: &str) -> f64 {
     match c.split_once(':') {
         Some((m, sec)) => m.parse::<f64>().unwrap_or(0.0) * 60.0 + sec.parse::<f64>().unwrap_or(0.0),
         None => c.parse::<f64>().unwrap_or(0.0),
     }
 }
-fn period_len(p: i64) -> f64 {
+pub fn period_len(p: i64) -> f64 {
     if p <= 4 { 720.0 } else { 300.0 }
 }
-fn period_start(p: i64) -> f64 {
+pub fn period_start(p: i64) -> f64 {
     if p <= 4 { (p - 1) as f64 * 720.0 } else { 2880.0 + (p - 5) as f64 * 300.0 }
 }
 

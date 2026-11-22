@@ -53,6 +53,18 @@ CREATE TABLE IF NOT EXISTS stints (
   PRIMARY KEY (game_id, idx)
 );
 CREATE TABLE IF NOT EXISTS stints_done (game_id TEXT PRIMARY KEY);
+-- full ESPN summary response per game (gzip JSON): box score, play-by-play, officials, win prob, ...
+CREATE TABLE IF NOT EXISTS raw_summaries (game_id TEXT PRIMARY KEY, fetched_at TEXT, json_gz BLOB);
+-- play-by-play, one row per event (t = seconds elapsed in game; p1..p3 = participant athlete ids)
+CREATE TABLE IF NOT EXISTS plays (
+  game_id TEXT, seq INTEGER, period INTEGER, clock TEXT, t REAL, type_id TEXT, type_text TEXT, text TEXT,
+  team_id TEXT, p1 TEXT, p2 TEXT, p3 TEXT, scoring INTEGER, score_value INTEGER, shooting INTEGER,
+  points_attempted INTEGER, home_score INTEGER, away_score INTEGER, x REAL, y REAL, wallclock TEXT,
+  PRIMARY KEY (game_id, seq)
+);
+CREATE INDEX IF NOT EXISTS plays_p1 ON plays(p1);
+-- which derive version each game's play-by-play tables were computed with
+CREATE TABLE IF NOT EXISTS derived (game_id TEXT PRIMARY KEY, version INTEGER);
 -- betting lines (one provider per game; spread is the HOME team's line, negative = home favoured)
 CREATE TABLE IF NOT EXISTS odds (
   game_id TEXT PRIMARY KEY, provider TEXT, spread REAL, total REAL, ml_home INTEGER, ml_away INTEGER,

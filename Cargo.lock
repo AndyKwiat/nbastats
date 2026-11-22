@@ -617,6 +617,7 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "flate2",
  "rusqlite",
  "serde",
  "serde_json",

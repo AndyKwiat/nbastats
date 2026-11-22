@@ -26,3 +26,13 @@ It also refreshes daily at 03:00 US Pacific (`REFRESH_AT=HH:MM` to change, `off`
   small MLP on game-time features, and an ensemble. Walk-forward by day: no game ever sees same-day or later results.
 - Hyper-parameters tuned on 2024-25 only (`./target/release/app tune`); backtest vs lines on 2025-26 and 2026-27.
 - `./target/release/app betting` prints the JSON. Lines are re-pulled every `LINES_MINUTES` (default 60).
+
+## Stored data (SQLite, `data/nba.db`)
+
+Each finished game is downloaded once and kept:
+
+- `raw_summaries`: ESPN's full summary response, gzip JSON (`fetch::load_raw`), with everything ESPN sends
+  (box score, play-by-play, officials, win probability, odds, ...)
+- `plays`: play-by-play, one row per event (`t` = seconds elapsed, `p1..p3` = participant ids, `x/y` shot location)
+- Derived from play-by-play: `stints` (same ten players on court) and `player_onoff`. These are recomputed from
+  `raw_summaries` whenever `fetch::DERIVE_VERSION` is bumped, with no network calls. Run `app derive --all` to force it.

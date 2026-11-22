@@ -311,6 +311,17 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&dir)?;
     let db_path = dir.join("nba.db");
 
+    if args.get(1).map(|s| s.as_str()) == Some("derive") {
+        // recompute play-by-play tables from stored raw responses (no network)
+        let mut c = db::open(&db_path)?;
+        if args.iter().any(|a| a == "--all") {
+            c.execute("DELETE FROM derived", [])?;
+        }
+        let t = std::time::Instant::now();
+        let n = fetch::ensure_derived(&mut c)?;
+        eprintln!("derived {n} games in {:?}", t.elapsed());
+        return Ok(());
+    }
     if args.get(1).map(|s| s.as_str()) == Some("model") {
         // build the stats model only (set RAPM_CV=1 to print the RAPM cross-validation table)
         let c = db::open(&db_path)?;

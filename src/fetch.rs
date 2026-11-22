@@ -78,6 +78,7 @@ pub fn run(conn: &mut Connection, full: bool) -> Result<()> {
     let start = NaiveDate::parse_from_str(SEASON_START, "%Y-%m-%d")?;
     fetch_schedule(&c, conn, start, Utc::now().date_naive() + Duration::days(7))?;
     let n = fetch_boxscores(&c, conn, full)?;
+    ensure_derived(conn)?;
     if let Err(e) = fetch_history(&c, conn) {
         eprintln!("history fetch: {e:#}");
     }
@@ -323,7 +324,7 @@ fn fetch_boxscores(c: &Client, conn: &mut Connection, full: bool) -> Result<usiz
     let q = if full {
         "SELECT id FROM games WHERE status='STATUS_FINAL' ORDER BY date"
     } else {
-        "SELECT id FROM games WHERE status='STATUS_FINAL' AND (fetched=0 OR id NOT IN (SELECT game_id FROM odds) OR id NOT IN (SELECT game_id FROM onoff_done) OR id NOT IN (SELECT game_id FROM stints_done)) ORDER BY date"
+        "SELECT id FROM games WHERE status='STATUS_FINAL' AND (fetched=0 OR id NOT IN (SELECT game_id FROM odds) OR id NOT IN (SELECT game_id FROM raw_summaries)) ORDER BY date"
     };
     let ids: Vec<String> = conn.prepare(q)?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
     let total = ids.len();
@@ -432,23 +433,9 @@ fn store_summary(tx: &rusqlite::Transaction, gid: &str, v: &Value) -> Result<()>
         }
     }
     store_pickcenter(tx, gid, v)?;
-    tx.execute("DELETE FROM player_onoff WHERE game_id=?1", [gid])?;
-    let (onoff, stints) = crate::onoff::compute(v);
-    tx.execute("DELETE FROM stints WHERE game_id=?1", [gid])?;
-    for (k, st) in stints.iter().enumerate() {
-        tx.execute(
-            "INSERT INTO stints VALUES (?1,?2,?3,?4,?5,?6,?7)",
-            params![gid, k as i64, st.sec, st.home.join(","), st.away.join(","), st.hpts, st.apts],
-        )?;
-    }
-    tx.execute("INSERT OR IGNORE INTO stints_done VALUES (?1)", [gid])?;
-    for (pid, o) in onoff {
-        tx.execute(
-            "INSERT OR REPLACE INTO player_onoff VALUES (?1,?2,?3,?4,?5,?6)",
-            params![gid, pid, o.team, o.sec, o.pf, o.pa],
-        )?;
-    }
-    tx.execute("INSERT OR IGNORE INTO onoff_done VALUES (?1)", [gid])?;
+    store_raw(tx, gid, v)?;
+    store_plays(tx, gid, v)?;
+    derive_game(tx, gid, v)?;
     tx.execute("UPDATE games SET fetched=1 WHERE id=?1", [gid])?;
     Ok(())
 }
@@ -587,4 +574,121 @@ fn fetch_history(c: &Client, conn: &mut Connection) -> Result<()> {
         std::thread::sleep(StdDuration::from_millis(100));
     }
     Ok(())
+}
+
+// ---------- raw storage + derived tables ----------
+
+/// Bump when the play-by-play derivations (on/off, stints, ...) change; every game is then
+/// recomputed from the stored raw responses on the next refresh, with no network calls.
+pub const DERIVE_VERSION: i64 = 1;
+
+/// Keep ESPN's full summary response for every game, gzip-compressed, so future analyses never
+/// need to download it again.
+fn store_raw(tx: &rusqlite::Transaction, gid: &str, v: &Value) -> Result<()> {
+    use std::io::Write;
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(&serde_json::to_vec(v)?)?;
+    tx.execute(
+        "INSERT OR REPLACE INTO raw_summaries(game_id, fetched_at, json_gz) VALUES (?1, ?2, ?3)",
+        params![gid, Utc::now().to_rfc3339(), enc.finish()?],
+    )?;
+    Ok(())
+}
+
+pub fn load_raw(conn: &Connection, gid: &str) -> Result<Value> {
+    use std::io::Read;
+    let blob: Vec<u8> = conn.query_row("SELECT json_gz FROM raw_summaries WHERE game_id=?1", [gid], |r| r.get(0))?;
+    let mut s = String::new();
+    flate2::read::GzDecoder::new(&blob[..]).read_to_string(&mut s)?;
+    Ok(serde_json::from_str(&s)?)
+}
+
+/// One row per play-by-play event, in a flat, query-friendly form.
+fn store_plays(tx: &rusqlite::Transaction, gid: &str, v: &Value) -> Result<()> {
+    use crate::onoff::{clock_secs, period_len, period_start};
+    tx.execute("DELETE FROM plays WHERE game_id=?1", [gid])?;
+    let mut st = tx.prepare(
+        "INSERT OR REPLACE INTO plays (game_id, seq, period, clock, t, type_id, type_text, text, team_id,
+           p1, p2, p3, scoring, score_value, shooting, points_attempted, home_score, away_score, x, y, wallclock)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+    )?;
+    for p in v["plays"].as_array().cloned().unwrap_or_default() {
+        let period = p["period"]["number"].as_i64().unwrap_or(0);
+        let clock = s(&p["clock"]["displayValue"]);
+        let t = if period > 0 {
+            Some(period_start(period) + (period_len(period) - clock_secs(&clock)).clamp(0.0, period_len(period)))
+        } else {
+            None
+        };
+        let parts: Vec<String> = p["participants"].as_array().map(|a| a.iter().map(|x| s(&x["athlete"]["id"])).collect()).unwrap_or_default();
+        let part = |k: usize| parts.get(k).cloned().filter(|x| !x.is_empty());
+        // ESPN uses huge sentinel values for plays without a court location
+        let coord = |c: &Value| c.as_f64().filter(|x| x.abs() < 1000.0);
+        st.execute(params![
+            gid,
+            s(&p["sequenceNumber"]).parse::<i64>().unwrap_or(0),
+            period,
+            clock,
+            t,
+            s(&p["type"]["id"]),
+            s(&p["type"]["text"]),
+            s(&p["text"]),
+            s(&p["team"]["id"]),
+            part(0),
+            part(1),
+            part(2),
+            p["scoringPlay"].as_bool().unwrap_or(false) as i64,
+            p["scoreValue"].as_i64().unwrap_or(0),
+            p["shootingPlay"].as_bool().unwrap_or(false) as i64,
+            p["pointsAttempted"].as_i64().unwrap_or(0),
+            p["homeScore"].as_i64(),
+            p["awayScore"].as_i64(),
+            coord(&p["coordinate"]["x"]),
+            coord(&p["coordinate"]["y"]),
+            s(&p["wallclock"]),
+        ])?;
+    }
+    Ok(())
+}
+
+/// Tables computed from play-by-play (on/off totals, stints). Pure function of the raw response.
+pub fn derive_game(tx: &rusqlite::Transaction, gid: &str, v: &Value) -> Result<()> {
+    let (onoff, stints) = crate::onoff::compute(v);
+    tx.execute("DELETE FROM player_onoff WHERE game_id=?1", [gid])?;
+    tx.execute("DELETE FROM stints WHERE game_id=?1", [gid])?;
+    for (k, st) in stints.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO stints VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![gid, k as i64, st.sec, st.home.join(","), st.away.join(","), st.hpts, st.apts],
+        )?;
+    }
+    for (pid, o) in onoff {
+        tx.execute(
+            "INSERT OR REPLACE INTO player_onoff VALUES (?1,?2,?3,?4,?5,?6)",
+            params![gid, pid, o.team, o.sec, o.pf, o.pa],
+        )?;
+    }
+    tx.execute("INSERT OR REPLACE INTO derived(game_id, version) VALUES (?1, ?2)", params![gid, DERIVE_VERSION])?;
+    Ok(())
+}
+
+/// Recompute derived tables from stored raw responses for any game on an older derive version.
+pub fn ensure_derived(conn: &mut Connection) -> Result<usize> {
+    let ids: Vec<String> = conn
+        .prepare(
+            "SELECT r.game_id FROM raw_summaries r LEFT JOIN derived d ON d.game_id = r.game_id
+             WHERE d.version IS NULL OR d.version < ?1",
+        )?
+        .query_map([DERIVE_VERSION], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    for gid in &ids {
+        let v = load_raw(conn, gid)?;
+        let tx = conn.transaction()?;
+        derive_game(&tx, gid, &v)?;
+        tx.commit()?;
+    }
+    if !ids.is_empty() {
+        eprintln!("re-derived {} games from stored play-by-play", ids.len());
+    }
+    Ok(ids.len())
 }
