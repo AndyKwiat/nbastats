@@ -264,3 +264,9 @@ img.hs { width: 40px; height: 40px; }
 .t tr.sel td { background: color-mix(in srgb, var(--accent) 9%, transparent); }
 .t td.wrap { white-space: normal; min-width: 260px; color: var(--ink2); }
 .t.bt td { font-size: 12.5px; }
+
+/* mode tabs wrap instead of hiding buttons off-screen; nav shows a fade when it scrolls */
+.seg { flex-wrap: wrap; overflow: visible; row-gap: 3px; }
+@media (max-width: 760px) {
+  nav { -webkit-mask-image: linear-gradient(90deg, #000 85%, transparent); mask-image: linear-gradient(90deg, #000 85%, transparent); padding-right: 28px; }
+}
