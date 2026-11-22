@@ -419,6 +419,11 @@ fn main() -> anyhow::Result<()> {
         .route("/api/refresh", post(refresh))
         .fallback_service(ServeDir::new(&static_dir).fallback(ServeFile::new(index)))
         .layer(CompressionLayer::new())
+        // always revalidate so a deploy shows up on the next page load (304 if unchanged)
+        .layer(tower_http::set_header::SetResponseHeaderLayer::if_not_present(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-cache"),
+        ))
         .with_state(st);
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());

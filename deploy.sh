@@ -6,6 +6,9 @@ cargo build --release -j2 --target x86_64-unknown-linux-musl
 rm -rf dist && mkdir -p dist/bin dist/seed
 cp target/x86_64-unknown-linux-musl/release/app dist/bin/app
 cp -r static dist/static
+# cache-bust: tag asset URLs with the commit so browsers fetch the new JS/CSS after a deploy
+V=$(git rev-parse --short HEAD)$(git diff --quiet || echo -dirty)
+sed -i "s#/app.css\"#/app.css?v=$V\"#; s#/app.js\"#/app.js?v=$V\"#" dist/static/index.html
 # Ship the current database as a seed; the server copies it into $DATA_DIR on first start only.
 if [ -f data/nba.db ]; then sqlite3 data/nba.db "VACUUM INTO 'dist/seed/nba.db'"; fi
 ${RADIFY:-radify} deploy nbastats dist
