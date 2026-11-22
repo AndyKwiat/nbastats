@@ -137,6 +137,32 @@ struct Stint {
     hi_reb: f64,
     hi_ast: f64,
     last_day: String,
+    oo: OnOffAcc,
+}
+
+/// Team results with a player on vs off the court (only games he played in).
+#[derive(Default, Clone, Copy)]
+struct OnOffAcc {
+    on_sec: f64,
+    on_pf: f64,
+    on_pa: f64,
+    on_poss: f64,
+    off_sec: f64,
+    off_pf: f64,
+    off_pa: f64,
+    off_poss: f64,
+}
+impl OnOffAcc {
+    fn add(&mut self, o: &OnOffAcc) {
+        self.on_sec += o.on_sec;
+        self.on_pf += o.on_pf;
+        self.on_pa += o.on_pa;
+        self.on_poss += o.on_poss;
+        self.off_sec += o.off_sec;
+        self.off_pf += o.off_pf;
+        self.off_pa += o.off_pa;
+        self.off_poss += o.off_poss;
+    }
 }
 
 pub struct Model {
@@ -333,6 +359,7 @@ pub fn build(conn: &Connection) -> Result<Model> {
     let mut ta: Vec<TeamAgg> = (0..nt).map(|_| TeamAgg::default()).collect();
     let mut lg = Bx::default();
     let mut lg_poss = 0.0;
+    let mut game_poss: HashMap<String, f64> = HashMap::new();
     for g in &finals {
         let hi = tix[&g.home];
         let ai = tix[&g.away];
@@ -341,6 +368,7 @@ pub fn build(conn: &Connection) -> Result<Model> {
         hb.min = game_min(g);
         ab.min = game_min(g);
         let p = poss(&hb, &ab);
+        game_poss.insert(g.id.clone(), p);
         for (me, opp, mb, ob, home) in [(hi, ai, hb, ab, true), (ai, hi, ab, hb, false)] {
             let tg = &tgs[&(g.id.clone(), teams[me].id.clone())];
             let otg = &tgs[&(g.id.clone(), teams[opp].id.clone())];
@@ -703,6 +731,15 @@ pub fn build(conn: &Connection) -> Result<Model> {
         })?
         .collect::<Result<_, _>>()?;
 
+    let mut onoff: HashMap<(String, String), (f64, f64, f64)> = HashMap::new();
+    {
+        let mut st = conn.prepare("SELECT game_id,player_id,sec,pf,pa FROM player_onoff")?;
+        let rows = st.query_map([], |r| Ok(((r.get::<_, String>(0)?, r.get::<_, String>(1)?), (r.get(2)?, r.get(3)?, r.get(4)?))))?;
+        for x in rows {
+            let (k, v) = x?;
+            onoff.insert(k, v);
+        }
+    }
     let mut stints: HashMap<(String, String), Stint> = HashMap::new();
     // per game top scorers for the games list
     let mut top: HashMap<(String, String), (String, f64, f64, f64)> = HashMap::new();
@@ -748,6 +785,25 @@ pub fn build(conn: &Connection) -> Result<Model> {
             s.gp += 1;
             s.gs += rw.get::<_, i64>(3)?;
             s.pm += f(21)?;
+            if let (Some(&(sec, pf, pa)), Some(&gposs), Some(tg)) =
+                (onoff.get(&(gid.clone(), pid.clone())), game_poss.get(&gid), tgs.get(&(gid.clone(), tid.clone())))
+            {
+                let gsec = game_min(g) / 5.0 * 60.0;
+                let rate = gposs / gsec;
+                let tpts = tg.b.pts;
+                let opts = (g.hs + g.aws) as f64 - tpts;
+                let sec = sec.min(gsec);
+                s.oo.add(&OnOffAcc {
+                    on_sec: sec,
+                    on_pf: pf,
+                    on_pa: pa,
+                    on_poss: sec * rate,
+                    off_sec: gsec - sec,
+                    off_pf: (tpts - pf).max(0.0),
+                    off_pa: (opts - pa).max(0.0),
+                    off_poss: (gsec - sec) * rate,
+                });
+            }
             s.gmsc += b.pts + 0.4 * b.fgm - 0.7 * b.fga - 0.4 * (b.fta - b.ftm) + 0.7 * b.oreb + 0.3 * b.dreb + b.stl
                 + 0.7 * b.ast + 0.7 * b.blk - 0.4 * b.pf - b.tov;
             let tens = [b.pts, b.reb, b.ast, b.stl, b.blk].iter().filter(|x| **x >= 10.0).count();
@@ -984,6 +1040,7 @@ pub fn build(conn: &Connection) -> Result<Model> {
             tot.hi_pts = tot.hi_pts.max(s.hi_pts);
             tot.hi_reb = tot.hi_reb.max(s.hi_reb);
             tot.hi_ast = tot.hi_ast.max(s.hi_ast);
+            tot.oo.add(&s.oo);
         }
         let b = &tot.b;
         let bpm = d(bpm_num, b.min);
@@ -1068,6 +1125,26 @@ pub fn build(conn: &Connection) -> Result<Model> {
         m.insert("ws48".into(), r(d(ws * 48.0, b.min), 3));
         m.insert("bpm".into(), r(bpm, 1));
         m.insert("vorp".into(), r(vorp, 2));
+        // on/off court (per 100 possessions; possessions apportioned by time within each game)
+        let oo = &tot.oo;
+        if oo.on_sec > 0.0 {
+            let (on_o, on_d) = (100.0 * d(oo.on_pf, oo.on_poss), 100.0 * d(oo.on_pa, oo.on_poss));
+            m.insert("on_min".into(), r(oo.on_sec / 60.0, 0));
+            m.insert("off_min".into(), r(oo.off_sec / 60.0, 0));
+            m.insert("on_ortg".into(), r(on_o, 1));
+            m.insert("on_drtg".into(), r(on_d, 1));
+            m.insert("on_net".into(), r(on_o - on_d, 1));
+            m.insert("on_pm".into(), r(oo.on_pf - oo.on_pa, 0));
+            if oo.off_poss > 0.0 {
+                let (off_o, off_d) = (100.0 * d(oo.off_pf, oo.off_poss), 100.0 * d(oo.off_pa, oo.off_poss));
+                m.insert("off_ortg".into(), r(off_o, 1));
+                m.insert("off_drtg".into(), r(off_d, 1));
+                m.insert("off_net".into(), r(off_o - off_d, 1));
+                m.insert("oo_ortg".into(), r(on_o - off_o, 1));
+                m.insert("oo_drtg".into(), r(on_d - off_d, 1));
+                m.insert("oo_net".into(), r((on_o - on_d) - (off_o - off_d), 1));
+            }
+        }
         player_out.push(Value::Object(m));
     }
     player_out.sort_by(|a, b| {

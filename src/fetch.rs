@@ -323,7 +323,7 @@ fn fetch_boxscores(c: &Client, conn: &mut Connection, full: bool) -> Result<usiz
     let q = if full {
         "SELECT id FROM games WHERE status='STATUS_FINAL' ORDER BY date"
     } else {
-        "SELECT id FROM games WHERE status='STATUS_FINAL' AND (fetched=0 OR id NOT IN (SELECT game_id FROM odds)) ORDER BY date"
+        "SELECT id FROM games WHERE status='STATUS_FINAL' AND (fetched=0 OR id NOT IN (SELECT game_id FROM odds) OR id NOT IN (SELECT game_id FROM onoff_done)) ORDER BY date"
     };
     let ids: Vec<String> = conn.prepare(q)?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
     let total = ids.len();
@@ -432,6 +432,14 @@ fn store_summary(tx: &rusqlite::Transaction, gid: &str, v: &Value) -> Result<()>
         }
     }
     store_pickcenter(tx, gid, v)?;
+    tx.execute("DELETE FROM player_onoff WHERE game_id=?1", [gid])?;
+    for (pid, o) in crate::onoff::compute(v) {
+        tx.execute(
+            "INSERT OR REPLACE INTO player_onoff VALUES (?1,?2,?3,?4,?5,?6)",
+            params![gid, pid, o.team, o.sec, o.pf, o.pa],
+        )?;
+    }
+    tx.execute("INSERT OR IGNORE INTO onoff_done VALUES (?1)", [gid])?;
     tx.execute("UPDATE games SET fetched=1 WHERE id=?1", [gid])?;
     Ok(())
 }

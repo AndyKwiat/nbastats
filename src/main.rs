@@ -1,6 +1,7 @@
 mod betting;
 mod db;
 mod fetch;
+mod onoff;
 mod stats;
 
 use axum::{

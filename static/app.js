@@ -116,6 +116,8 @@ async function load() {
     p.t = T[p.team];
     p.tgp = p.t ? p.t.gp : p.gp;
     p.qual = p.gp >= Math.max(1, 0.5 * p.tgp) && p.mpg >= 12;
+    // on/off needs real samples both ways: 250+ on-court and 100+ off-court minutes
+    p.qoo = p.qual && p.oo_net != null && p.on_min >= 250 && p.off_min >= 100;
   });
   const up = league.updated ? new Date(league.updated) : null;
   $('#foot').innerHTML = `Data: ESPN public API · ${league.games_played} games · updated ${up ? up.toLocaleString() : '—'} · Advanced stats computed from box scores (Basketball-Reference formulas).
@@ -254,6 +256,12 @@ const CATS = [
   { k: 'bpm', l: 'Box Plus/Minus', f: 's1', q: p => p.qual, d: 'Points per 100 poss. above average (BPM 1.0 estimate)' },
   { k: 'vorp', l: 'VORP', f: 2, d: 'Value over replacement player' },
   { k: 'ws48', l: 'WS / 48', f: 'p3', q: p => p.qual },
+  { k: 'oo_net', l: 'On-Off Net Rating', f: 's1', q: p => p.qoo, d: 'Team net rating with him on court minus with him off' },
+  { k: 'oo_ortg', l: 'On-Off Off. Rating', f: 's1', q: p => p.qoo },
+  { k: 'oo_drtg', l: 'On-Off Def. Rating', f: 's1', q: p => p.qoo, asc: 1 },
+  { k: 'on_net', l: 'On-Court Net Rating', f: 's1', q: p => p.qoo },
+  { k: 'on_ortg', l: 'On-Court Off. Rating', f: 1, q: p => p.qoo },
+  { k: 'on_drtg', l: 'On-Court Def. Rating', f: 1, q: p => p.qoo, asc: 1 },
   { k: 'ts', l: 'True Shooting %', f: 'p', q: qFG },
   { k: 'fgp', l: 'Field Goal %', f: 'p', q: qFG }, { k: 'tpp', l: '3-Point %', f: 'p', q: q3P }, { k: 'ftp', l: 'Free Throw %', f: 'p', q: qFT },
   { k: 'efg', l: 'Effective FG %', f: 'p', q: qFG },
@@ -284,10 +292,10 @@ function leaderCard(c, mode, n = 10) {
     <a class="lead" href="#/player/${top.id}">${hsImg(top, 260, '')}<div class="info"><div class="cat">${c.l}${c.cnt && mode === 'p36' ? ' / 36' : ''}</div>
       <div class="big">${fmt(top[k], f)}</div><div class="who">${esc(top.name)} <small>${esc(top.t?.abbr || '')}</small></div></div></a>
     <ol>${rows.slice(1).map((p, i) => `<li><a href="#/player/${p.id}"><span class="i">${i + 2}</span>${hsImg(p, 60)}<span class="nm">${esc(p.name)}<small>${esc(p.t?.abbr || '')}</small></span><span class="v">${fmt(p[k], f)}</span></a></li>`).join('')}</ol>
-    <a class="more" href="#/players?sort=${k}${c.asc ? '&asc=1' : ''}&mode=${['pts', 'reb', 'ast', 'stl', 'blk', 'tpm'].includes(c.k) ? mode : 'adv'}">Full list →</a></div>`;
+    <a class="more" href="#/players?sort=${k}${c.asc ? '&asc=1' : ''}&mode=${['pts', 'reb', 'ast', 'stl', 'blk', 'tpm'].includes(c.k) ? mode : /^(oo|on)_/.test(c.k) ? 'oo' : 'adv'}">Full list →</a></div>`;
 }
 async function leaders() {
-  app.innerHTML = `<div class="pagehead"><div><h1>League Leaders</h1><p>Qualified: played ≥ 50% of team games and ≥ 12 min per game. Shooting % require minimum makes.</p></div>
+  app.innerHTML = `<div class="pagehead"><div><h1>League Leaders</h1><p>Qualified: played ≥ 50% of team games and ≥ 12 min per game. Shooting % require minimum makes. On/off ratings need 250+ minutes on court and 100+ off.</p></div>
     <div class="seg" id="mode"><button data-m="pg" class="on">Per Game</button><button data-m="tot">Totals</button><button data-m="p36">Per 36</button></div></div>
     <div class="grid leaders-grid" id="lg"></div>`;
   const draw = m => {
@@ -311,6 +319,10 @@ const P_MODES = {
   shoot: { l: 'Shooting', cols: () => [cGP, { k: 'fgm', l: 'FGM', f: 1 }, { k: 'fga', l: 'FGA', f: 1 }, { k: 'fgp', l: 'FG%', f: 'p' }, { k: 'tpm', l: '3PM', f: 1 }, { k: 'tpa', l: '3PA', f: 1 }, { k: 'tpp', l: '3P%', f: 'p' },
     { k: 'ftm', l: 'FTM', f: 1 }, { k: 'fta', l: 'FTA', f: 1 }, { k: 'ftp', l: 'FT%', f: 'p' }, { k: 'efg', l: 'eFG%', f: 'p' }, { k: 'ts', l: 'TS%', f: 'p' }, { k: 'tpar', l: '3PAr', f: 'p3' }, { k: 'ftr', l: 'FTr', f: 'p3' }, { k: 'hi_pts', l: 'High', f: 0 }], key: 'ts' },
 };
+P_MODES.oo = { l: 'On/Off', key: 'oo_net', cols: () => [cGP, { k: 'on_min', l: 'On MIN', f: 0 }, { k: 'off_min', l: 'Off MIN', f: 0 },
+  { k: 'on_ortg', l: 'On ORtg', f: 1 }, { k: 'off_ortg', l: 'Off ORtg', f: 1 }, { k: 'oo_ortg', l: '± ORtg', f: 's1', sc: 1, t: 'On minus off (higher = better offense with him)' },
+  { k: 'on_drtg', l: 'On DRtg', f: 1, asc: 1 }, { k: 'off_drtg', l: 'Off DRtg', f: 1, asc: 1 }, { k: 'oo_drtg', l: '± DRtg', f: 's1', asc: 1, t: 'On minus off (negative = better defense with him)', h: r => `<span class="${sgnCls(-(r.oo_drtg ?? 0))}">${fmt(r.oo_drtg, 's1')}</span>` },
+  { k: 'on_net', l: 'On Net', f: 's1', sc: 1 }, { k: 'off_net', l: 'Off Net', f: 's1', sc: 1 }, { k: 'oo_net', l: 'On-Off', f: 's1', sc: 1, t: 'On-court net minus off-court net' }, { k: 'on_pm', l: 'On +/-', f: 's0', sc: 1 }] };
 const LBL = { pts: 'PTS', fgm: 'FGM', fga: 'FGA', tpm: '3PM', tpa: '3PA', ftm: 'FTM', fta: 'FTA', oreb: 'OREB', dreb: 'DREB', reb: 'REB', ast: 'AST', stl: 'STL', blk: 'BLK', tov: 'TO', pf: 'PF' };
 const cGP = { k: 'gp', l: 'GP' };
 const cMPG = { k: 'mpg', l: 'MIN', f: 1 };
@@ -327,7 +339,7 @@ async function players(q) {
   let sortKey = o.sort, sortAsc = !!o.asc;
   const rows = () => {
     const s = $('#q').value.trim().toLowerCase(), tm = $('#tm').value, pos = $('#pos').value, qual = $('#qual').checked;
-    return D.players.filter(p => (!s || p.name.toLowerCase().includes(s)) && (!tm || p.teams.includes(tm)) && (!pos || (p.pos || '').includes(pos)) && (!qual || p.qual));
+    return D.players.filter(p => (!s || p.name.toLowerCase().includes(s)) && (!tm || p.teams.includes(tm)) && (!pos || (p.pos || '').includes(pos)) && (!qual || (mode === 'oo' ? p.qoo : p.qual)));
   };
   let tb;
   const draw = () => {
@@ -370,6 +382,7 @@ async function player(id) {
       <div class="card flush"><div class="hd"><h2>Season</h2></div><div id="season"></div></div>
       <div class="card flush"><div class="hd"><h2>Advanced</h2></div><div id="adv"></div></div>
     </div>
+    <div class="card flush mt"><div class="hd"><h2>On / Off Court</h2><span class="sub">Team per 100 possessions, in games he played</span></div><div id="oo"></div></div>
     <div class="card flush mt"><div class="hd"><h2>Game Log</h2></div><div id="log"></div></div>`;
   // season table
   const sRows = [
@@ -380,6 +393,18 @@ async function player(id) {
   const adv = [['PER', p.per, 1, 'per'], ['USG%', p.usg, 1, 'usg'], ['AST%', p.astp, 1, 'astp'], ['TOV%', p.tovp, 1, 'tovp', 1], ['ORB%', p.orbp, 1, 'orbp'], ['DRB%', p.drbp, 1, 'drbp'], ['TRB%', p.trbp, 1, 'trbp'], ['STL%', p.stlp, 1, 'stlp'], ['BLK%', p.blkp, 1, 'blkp'],
     ['ORtg', p.ortg, 1, 'ortg'], ['DRtg', p.drtg, 1, 'drtg', 1], ['OWS', p.ows, 2, 'ows'], ['DWS', p.dws, 2, 'dws'], ['WS', p.ws, 2, 'ws'], ['WS/48', p.ws48, 'p3', 'ws48'], ['BPM', p.bpm, 's1', 'bpm'], ['VORP', p.vorp, 2, 'vorp'], ['Game Score', p.gmsc, 1, 'gmsc'], ['DD / TD', `${p.dd} / ${p.td}`]];
   $('#adv').innerHTML = `<div class="tw"><table class="t"><tbody>${adv.map(([k, v, f, rk, asc]) => `<tr><td class="l">${k}</td><td><b>${fmt(v, f)}</b></td><td class="muted">${rk ? rankAmong(p, rk, asc) : ''}</td></tr>`).join('')}</tbody></table></div>`;
+  // on/off
+  if (p.on_ortg == null) $('#oo').innerHTML = '<div class="sub" style="padding:0 16px 14px">No play-by-play data.</div>';
+  else {
+    const cell = (v, f, good) => `<td class="${good == null ? '' : good ? 'pos' : 'neg'}"><b>${fmt(v, f)}</b></td>`;
+    const rk = (k, asc) => p.qoo ? (() => { const pool = D.players.filter(x => x.qoo); return `#${1 + pool.filter(x => asc ? x[k] < p[k] : x[k] > p[k]).length} of ${pool.length}`; })() : '';
+    $('#oo').innerHTML = `<div class="tw"><table class="t"><thead><tr><th class="l"></th><th>MIN</th><th>Off Rtg</th><th>Def Rtg</th><th>Net Rtg</th></tr></thead><tbody>
+      <tr><td class="l"><b>On court</b></td><td>${fmt(p.on_min, 0)}</td>${cell(p.on_ortg, 1)}${cell(p.on_drtg, 1)}${cell(p.on_net, 's1')}</tr>
+      <tr><td class="l"><b>Off court</b></td><td>${fmt(p.off_min, 0)}</td>${cell(p.off_ortg, 1)}${cell(p.off_drtg, 1)}${cell(p.off_net, 's1')}</tr>
+      <tr><td class="l"><b>On − Off</b></td><td></td>${cell(p.oo_ortg, 's1', p.oo_ortg > 0)}${cell(p.oo_drtg, 's1', p.oo_drtg < 0)}${cell(p.oo_net, 's1', p.oo_net > 0)}</tr>
+      <tr><td class="l muted">League rank</td><td></td><td class="muted">${rk('oo_ortg')}</td><td class="muted">${rk('oo_drtg', 1)}</td><td class="muted">${rk('oo_net')}</td></tr>
+    </tbody></table></div>${p.qoo ? '' : '<div class="sub" style="padding:8px 16px 12px">Not ranked: needs 250+ minutes on and 100+ off court.</div>'}`;
+  }
   // log
   log.forEach(g => {
     g.day = D.games.find(x => x.id === g.game_id)?.day || g.date.slice(0, 10);
@@ -455,7 +480,7 @@ async function team(id) {
       <div class="card"><div class="hd"><h2>Four Factors</h2><span class="sub">vs league average</span></div><div id="ff"></div></div>
       <div class="card"><div class="hd"><h2>Elo Rating</h2></div><div id="elo"></div></div>
     </div>
-    <div class="card flush mt"><div class="hd"><h2>Roster</h2><div class="seg" id="rm"><button data-m="pg" class="on">Per Game</button><button data-m="adv">Advanced</button><button data-m="shoot">Shooting</button></div></div><div id="roster"></div></div>
+    <div class="card flush mt"><div class="hd"><h2>Roster</h2><div class="seg" id="rm"><button data-m="pg" class="on">Per Game</button><button data-m="adv">Advanced</button><button data-m="shoot">Shooting</button><button data-m="oo">On/Off</button></div></div><div id="roster"></div></div>
     <div class="card flush mt"><div class="hd"><h2>Schedule & Results</h2></div><div id="sched"></div></div>`;
   // four factors
   const lg = k => D.teams.reduce((a, x) => a + x[k], 0) / D.teams.length;
@@ -719,6 +744,26 @@ async function charts() {
         id: 'pvp', xl: 'Box Plus/Minus →', yl: 'Win Shares / 48 →', yf: v => v.toFixed(2), size: innerWidth < 560 ? 30 : 40, avgX: 0, avgY: .1,
         pts: ps.map(p => ({ x: p.bpm, y: p.ws48, kind: 'hs', r: 0.45 + 0.55 * Math.sqrt(p.min / mx), img: hsUrl(p, 96), color: p.t?.tc || '#888', href: '#/player/' + p.id,
           tip: `<b>${esc(p.name)}</b> <span class="muted">${esc(p.t?.abbr || '')}</span>${tipRows([['BPM', fmt(p.bpm, 's1')], ['WS/48', fmt(p.ws48, 'p3')], ['WS', fmt(p.ws, 1)], ['PER', fmt(p.per, 1)]])}` })) });
+    }],
+    ['onoff', 'On Court vs Off Court', 'Team net rating with each player on the floor vs on the bench (same games). Above the diagonal = the team is better with him playing. 250+ on-court and 100+ off-court minutes only.', el => {
+      const ps = D.players.filter(p => p.qoo);
+      const mx = Math.max(...ps.map(p => p.on_min));
+      scatter(el, {
+        id: 'onoff', xf: v => (v > 0 ? '+' : '') + v, yf: v => (v > 0 ? '+' : '') + v, xl: 'Off-court net rating →', yl: 'On-court net rating →', square: true, size: innerWidth < 560 ? 30 : 40,
+        diags: [{ slope: 1, c: 0, label: 'no difference', at: .12 }, { slope: 1, c: 10, label: '+10 swing', at: .12 }, { slope: 1, c: -10, label: '−10 swing', at: .88 }],
+        quads: ['Carries a bad team', 'Good team, better with him', 'Bad team, worse with him', 'Team better without him'],
+        pts: ps.map(p => ({ x: p.off_net, y: p.on_net, kind: 'hs', r: 0.45 + 0.55 * Math.sqrt(p.on_min / mx), img: hsUrl(p, 96), color: p.t?.tc || '#888', href: '#/player/' + p.id,
+          tip: `<b>${esc(p.name)}</b> <span class="muted">${esc(p.t?.abbr || '')}</span>${tipRows([['On-court net', fmt(p.on_net, 's1')], ['Off-court net', fmt(p.off_net, 's1')], ['On − Off', fmt(p.oo_net, 's1')], ['Min on / off', `${p.on_min} / ${p.off_min}`]])}` })) });
+    }],
+    ['swing', 'Offensive vs Defensive Swing', 'How the team changes when each player sits down: on-minus-off offensive rating vs on-minus-off defensive rating. Up = the defense allows fewer points with him; right = the offense scores more. Dashed lines = total net swing.', el => {
+      const ps = D.players.filter(p => p.qoo);
+      const mx = Math.max(...ps.map(p => p.on_min));
+      scatter(el, {
+        id: 'swing', xf: v => (v > 0 ? '+' : '') + v, yf: v => (v > 0 ? '+' : '') + v, xl: 'Offensive swing (on − off ORtg) →', yl: 'Defensive swing (on − off DRtg, better ↑)', invY: true, size: innerWidth < 560 ? 30 : 40, avgX: 0, avgY: 0,
+        diags: [-10, 0, 10, 20].map(c => ({ slope: 1, c: -c, label: (c > 0 ? '+' : c < 0 ? '−' : '') + Math.abs(c) + ' net', at: .93 })),
+        quads: ['Defensive anchor', 'Two-way impact', 'Hurts both ends', 'Offensive engine'],
+        pts: ps.map(p => ({ x: p.oo_ortg, y: p.oo_drtg, kind: 'hs', r: 0.45 + 0.55 * Math.sqrt(p.on_min / mx), img: hsUrl(p, 96), color: p.t?.tc || '#888', href: '#/player/' + p.id,
+          tip: `<b>${esc(p.name)}</b> <span class="muted">${esc(p.t?.abbr || '')}</span>${tipRows([['ORtg on / off', `${fmt(p.on_ortg, 1)} / ${fmt(p.off_ortg, 1)}`], ['DRtg on / off', `${fmt(p.on_drtg, 1)} / ${fmt(p.off_drtg, 1)}`], ['Net swing', fmt(p.oo_net, 's1')]])}` })) });
     }],
     ['elo', 'Elo Through the Season', 'Every team\'s Elo after each game. Tap logos to highlight teams.', el => {
       const sorted = D.teams.slice().sort((a, b) => b.elo - a.elo);
