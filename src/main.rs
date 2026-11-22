@@ -2,6 +2,7 @@ mod betting;
 mod db;
 mod fetch;
 mod onoff;
+mod rapm;
 mod stats;
 
 use axum::{
@@ -171,6 +172,74 @@ async fn player_log(State(s): State<S>, Path(id): Path<String>) -> Response {
     }
 }
 
+/// Team results split by whether this player and each teammate were on the floor
+/// (both on / only him / only the teammate / neither), from stints in games he played.
+async fn player_splits(State(s): State<S>, Path(id): Path<String>) -> Response {
+    let rate = s.model.read().unwrap().poss_rate.clone();
+    let res = (|| -> anyhow::Result<Value> {
+        let c = db::open(&s.db_path)?;
+        let mut st = c.prepare(
+            "SELECT s.game_id, s.sec, s.home, s.away, s.hpts, s.apts, (g.home_id = pg.team_id) AS is_home
+             FROM stints s JOIN player_games pg ON pg.game_id = s.game_id AND pg.player_id = ?1
+             JOIN games g ON g.id = s.game_id WHERE pg.min > 0",
+        )?;
+        #[derive(Default, Clone, Copy)]
+        struct B { sec: f64, pf: f64, pa: f64, poss: f64 }
+        // teammate -> [both, me only, mate only, neither]
+        let mut acc: std::collections::HashMap<String, [B; 4]> = Default::default();
+        let mut stints: Vec<(Vec<String>, B, bool)> = vec![];
+        let mut rows = st.query([&id])?;
+        while let Some(r) = rows.next()? {
+            let gid: String = r.get(0)?;
+            let Some(rt) = rate.get(&gid) else { continue };
+            let sec: f64 = r.get(1)?;
+            let (home, away): (String, String) = (r.get(2)?, r.get(3)?);
+            let (hp, ap): (f64, f64) = (r.get(4)?, r.get(5)?);
+            let is_home: bool = r.get::<_, i64>(6)? != 0;
+            let (mine, pf, pa) = if is_home { (home, hp, ap) } else { (away, ap, hp) };
+            let lineup: Vec<String> = mine.split(',').filter(|x| !x.is_empty()).map(String::from).collect();
+            let on = lineup.contains(&id);
+            for p in &lineup {
+                if p != &id {
+                    acc.entry(p.clone()).or_default();
+                }
+            }
+            stints.push((lineup, B { sec, pf, pa, poss: sec * rt }, on));
+        }
+        for (mate, buckets) in acc.iter_mut() {
+            for (lineup, b, on) in &stints {
+                let mate_on = lineup.contains(mate);
+                let k = match (*on, mate_on) { (true, true) => 0, (true, false) => 1, (false, true) => 2, (false, false) => 3 };
+                let x = &mut buckets[k];
+                x.sec += b.sec;
+                x.pf += b.pf;
+                x.pa += b.pa;
+                x.poss += b.poss;
+            }
+        }
+        let cell = |b: &B| {
+            if b.poss < 20.0 {
+                json!({ "min": (b.sec / 60.0).round() })
+            } else {
+                let o = 100.0 * b.pf / b.poss;
+                let d = 100.0 * b.pa / b.poss;
+                json!({ "min": (b.sec / 60.0).round(), "ortg": (o * 10.0).round() / 10.0, "drtg": (d * 10.0).round() / 10.0, "net": ((o - d) * 10.0).round() / 10.0 })
+            }
+        };
+        let mut out: Vec<(f64, Value)> = acc
+            .iter()
+            .filter(|(_, b)| b[0].sec >= 30.0 * 60.0)
+            .map(|(m, b)| (b[0].sec, json!({ "id": m, "both": cell(&b[0]), "me": cell(&b[1]), "mate": cell(&b[2]), "neither": cell(&b[3]) })))
+            .collect();
+        out.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        Ok(json!({ "splits": out.into_iter().map(|x| x.1).collect::<Vec<_>>() }))
+    })();
+    match res {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 fn seed_db(db_path: &std::path::Path) {
     if db_path.exists() {
         return;
@@ -242,6 +311,14 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&dir)?;
     let db_path = dir.join("nba.db");
 
+    if args.get(1).map(|s| s.as_str()) == Some("model") {
+        // build the stats model only (set RAPM_CV=1 to print the RAPM cross-validation table)
+        let c = db::open(&db_path)?;
+        let t = std::time::Instant::now();
+        stats::build(&c)?;
+        eprintln!("model built in {:?}", t.elapsed());
+        return Ok(());
+    }
     if args.get(1).map(|s| s.as_str()) == Some("fetch") {
         let full = args.iter().any(|a| a == "--full");
         let mut c = db::open(&db_path)?;
@@ -327,6 +404,7 @@ fn main() -> anyhow::Result<()> {
         .route("/api/betting", get(betting_api))
         .route("/api/game/{id}", get(game_box))
         .route("/api/player/{id}/log", get(player_log))
+        .route("/api/player/{id}/splits", get(player_splits))
         .route("/api/refresh", post(refresh))
         .fallback_service(ServeDir::new(&static_dir).fallback(ServeFile::new(index)))
         .layer(CompressionLayer::new())

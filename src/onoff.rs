@@ -12,6 +12,16 @@ pub struct OnOff {
     pub pa: f64, // opponent points while on court
 }
 
+/// A stretch of play with the same ten players on the floor.
+#[derive(Default, Debug, Clone)]
+pub struct Stint {
+    pub home: Vec<String>,
+    pub away: Vec<String>,
+    pub sec: f64,
+    pub hpts: f64,
+    pub apts: f64,
+}
+
 fn s(v: &Value) -> String {
     match v {
         Value::String(x) => x.clone(),
@@ -42,9 +52,11 @@ struct Ev {
     pts: f64, // points scored on this play (by `team`)
 }
 
-/// Returns per-player on-court totals for one game (empty if there is no usable play-by-play).
-pub fn compute(v: &Value) -> HashMap<String, OnOff> {
+/// Returns per-player on-court totals and the list of stints for one game
+/// (both empty if there is no usable play-by-play).
+pub fn compute(v: &Value) -> (HashMap<String, OnOff>, Vec<Stint>) {
     let mut out: HashMap<String, OnOff> = HashMap::new();
+    let mut stints: Vec<Stint> = vec![];
     let comp = &v["header"]["competitions"][0];
     let mut home_id = String::new();
     for t in comp["competitors"].as_array().cloned().unwrap_or_default() {
@@ -74,7 +86,7 @@ pub fn compute(v: &Value) -> HashMap<String, OnOff> {
         }
     }
     if teams.len() != 2 || home_id.is_empty() {
-        return out;
+        return (out, stints);
     }
     let mut evs: Vec<(i64, Ev)> = vec![];
     for p in v["plays"].as_array().cloned().unwrap_or_default() {
@@ -102,7 +114,7 @@ pub fn compute(v: &Value) -> HashMap<String, OnOff> {
         ));
     }
     if evs.len() < 50 {
-        return out;
+        return (out, stints);
     }
     // ESPN sometimes logs substitutions late (higher sequence number than plays after them),
     // so order by game clock first and use the sequence number only to break ties.
@@ -179,12 +191,26 @@ pub fn compute(v: &Value) -> HashMap<String, OnOff> {
                 }
             }
         };
+        let away_id = teams.iter().find(|t| **t != home_id).cloned().unwrap_or_default();
+        let mut cur = Stint::default();
+        let flush = |on: &HashMap<String, Vec<String>>, cur: &mut Stint, stints: &mut Vec<Stint>| {
+            if cur.sec > 0.0 || cur.hpts != 0.0 || cur.apts != 0.0 {
+                let mut h = on.get(&home_id).cloned().unwrap_or_default();
+                let mut a = on.get(&away_id).cloned().unwrap_or_default();
+                h.sort();
+                a.sort();
+                stints.push(Stint { home: h, away: a, ..cur.clone() });
+            }
+            *cur = Stint::default();
+        };
         for e in pe {
             if e.t > t_prev {
                 credit_time(&on, &mut out, e.t - t_prev);
+                cur.sec += e.t - t_prev;
                 t_prev = e.t;
             }
             if e.pts != 0.0 {
+                if e.team == home_id { cur.hpts += e.pts } else { cur.apts += e.pts }
                 for (tid, ps) in &on {
                     let (f, a) = if *tid == e.team { (e.pts, 0.0) } else { (0.0, e.pts) };
                     for p in ps {
@@ -198,6 +224,7 @@ pub fn compute(v: &Value) -> HashMap<String, OnOff> {
             if e.sub && e.parts.len() >= 2 {
                 let (inn, outp) = (&e.parts[0], &e.parts[1]);
                 let tid = team_of.get(outp).or_else(|| team_of.get(inn)).cloned().unwrap_or_else(|| e.team.clone());
+                flush(&on, &mut cur, &mut stints);
                 if let Some(l) = on.get_mut(&tid) {
                     l.retain(|x| x != outp);
                     if !l.contains(inn) {
@@ -209,10 +236,12 @@ pub fn compute(v: &Value) -> HashMap<String, OnOff> {
         let end = period_start(per) + period_len(per);
         if end > t_prev {
             credit_time(&on, &mut out, end - t_prev);
+            cur.sec += end - t_prev;
         }
+        flush(&on, &mut cur, &mut stints);
         prev_end = on;
     }
-    out
+    (out, stints)
 }
 
 #[cfg(test)]
@@ -221,7 +250,8 @@ mod tests {
     fn debug_file() {
         let Ok(p) = std::env::var("ONOFF_FILE") else { return };
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
-        let r = super::compute(&v);
+        let (r, st) = super::compute(&v);
+        eprintln!("stints {} sec {} pts {} {}", st.len(), st.iter().map(|x| x.sec).sum::<f64>(), st.iter().map(|x| x.hpts).sum::<f64>(), st.iter().map(|x| x.apts).sum::<f64>());
         let mut by: std::collections::HashMap<String, (f64, f64)> = Default::default();
         for o in r.values() {
             let e = by.entry(o.team.clone()).or_default();

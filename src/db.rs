@@ -47,6 +47,12 @@ CREATE TABLE IF NOT EXISTS player_onoff (
   PRIMARY KEY (game_id, player_id)
 );
 CREATE TABLE IF NOT EXISTS onoff_done (game_id TEXT PRIMARY KEY);
+-- stints: stretches with the same ten players on court (player ids comma-separated, sorted)
+CREATE TABLE IF NOT EXISTS stints (
+  game_id TEXT, idx INTEGER, sec REAL, home TEXT, away TEXT, hpts REAL, apts REAL,
+  PRIMARY KEY (game_id, idx)
+);
+CREATE TABLE IF NOT EXISTS stints_done (game_id TEXT PRIMARY KEY);
 -- betting lines (one provider per game; spread is the HOME team's line, negative = home favoured)
 CREATE TABLE IF NOT EXISTS odds (
   game_id TEXT PRIMARY KEY, provider TEXT, spread REAL, total REAL, ml_home INTEGER, ml_away INTEGER,

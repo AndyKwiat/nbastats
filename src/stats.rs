@@ -172,6 +172,29 @@ pub struct Model {
     pub games_json: String,
     pub league_json: String,
     pub elo_json: String,
+    /// possessions per second of game clock, per game (for stint-based splits)
+    pub poss_rate: HashMap<String, f64>,
+}
+
+/// Ridge strength for RAPM (in possessions). Chosen by 5-fold cross-validation by game
+/// (run with RAPM_CV=1 to print the table).
+const RAPM_LAMBDA: f64 = 8000.0;
+/// Pure RAPM (no box-score prior) cross-validates best with a lighter penalty.
+const RAPM0_LAMBDA: f64 = 2000.0;
+
+fn load_stints(conn: &Connection, rate: &HashMap<String, f64>) -> Result<Vec<crate::rapm::StintRow>> {
+    let mut st = conn.prepare("SELECT game_id, sec, home, away, hpts, apts FROM stints")?;
+    let rows = st.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, f64>(4)?, r.get::<_, f64>(5)?))
+    })?;
+    let mut out = vec![];
+    for x in rows {
+        let (g, sec, h, a, hp, ap) = x?;
+        let Some(rt) = rate.get(&g) else { continue };
+        let split = |s: &str| s.split(',').filter(|x| !x.is_empty()).map(String::from).collect::<Vec<_>>();
+        out.push(crate::rapm::StintRow { game: g, poss: sec * rt, home: split(&h), away: split(&a), hpts: hp, apts: ap });
+    }
+    Ok(out)
 }
 
 /// Solve A x = b (dense, partial pivoting).
@@ -990,6 +1013,7 @@ pub fn build(conn: &Connection) -> Result<Model> {
     for ((pid, tid), s) in &stints {
         by_player.entry(pid.clone()).or_default().push((tid.clone(), s.clone()));
     }
+    let mut box_prior: HashMap<String, (f64, f64)> = HashMap::new();
     let mut player_out = vec![];
     for (pid, mut sts) in by_player {
         sts.sort_by(|a, b| a.1.last_day.cmp(&b.1.last_day));
@@ -1044,6 +1068,7 @@ pub fn build(conn: &Connection) -> Result<Model> {
         }
         let b = &tot.b;
         let bpm = d(bpm_num, b.min);
+        box_prior.insert(pid.clone(), (bpm, b.min));
         let ws = ows + dws;
         let info = pinfo.get(&pid);
         let cur_team = sts.last().map(|x| x.0.clone()).unwrap_or_default();
@@ -1151,6 +1176,50 @@ pub fn build(conn: &Connection) -> Result<Model> {
         b["t_pts"].as_f64().unwrap_or(0.0).partial_cmp(&a["t_pts"].as_f64().unwrap_or(0.0)).unwrap()
     });
 
+    // ---------- RAPM ----------
+    let poss_rate: HashMap<String, f64> = finals
+        .iter()
+        .filter_map(|g| game_poss.get(&g.id).map(|p| (g.id.clone(), p / (game_min(g) / 5.0 * 60.0))))
+        .collect();
+    let rows = load_stints(conn, &poss_rate)?;
+    // Box-score prior: BPM, trusted in proportion to minutes, split evenly between offense and defense.
+    let priors: HashMap<String, (f64, f64)> = box_prior
+        .iter()
+        .map(|(p, (bpm, min))| {
+            let v = (bpm * min / (min + 250.0)).clamp(-8.0, 10.0);
+            (p.clone(), (v * 0.5, v * 0.5))
+        })
+        .collect();
+    let none = HashMap::new();
+    if std::env::var("RAPM_CV").is_ok() {
+        for lam in [250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0] {
+            eprintln!(
+                "lambda {lam:>6}: cv rmse  prior={:.3}  no-prior={:.3}",
+                crate::rapm::cross_validate(&rows, &priors, lam, 5),
+                crate::rapm::cross_validate(&rows, &none, lam, 5)
+            );
+        }
+        eprintln!("baseline (everyone 0): {:.3}", crate::rapm::cross_validate(&rows, &none, 1e9, 5));
+    }
+    let lam = std::env::var("RAPM_LAMBDA").ok().and_then(|x| x.parse().ok()).unwrap_or(RAPM_LAMBDA);
+    if !rows.is_empty() {
+        let fp = crate::rapm::fit(&rows, &priors, lam);
+        let f0 = crate::rapm::fit(&rows, &none, RAPM0_LAMBDA);
+        for v in player_out.iter_mut() {
+            let pid = v["id"].as_str().unwrap_or_default().to_string();
+            let m = v.as_object_mut().unwrap();
+            if let Some(x) = fp.players.get(&pid) {
+                m.insert("rapm".into(), r(x.off + x.def, 1));
+                m.insert("rapm_o".into(), r(x.off, 1));
+                m.insert("rapm_d".into(), r(x.def, 1));
+                m.insert("rapm_poss".into(), r(x.poss, 0));
+            }
+            if let Some(x) = f0.players.get(&pid) {
+                m.insert("rapm0".into(), r(x.off + x.def, 1));
+            }
+        }
+    }
+
     // ---------- games ----------
     let mut games_out = vec![];
     for g in &games {
@@ -1213,5 +1282,6 @@ pub fn build(conn: &Connection) -> Result<Model> {
         games_json: serde_json::to_string(&games_out)?,
         league_json: serde_json::to_string(&league)?,
         elo_json: serde_json::to_string(&elo_out)?,
+        poss_rate,
     })
 }

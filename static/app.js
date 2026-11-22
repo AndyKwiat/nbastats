@@ -256,6 +256,9 @@ const CATS = [
   { k: 'bpm', l: 'Box Plus/Minus', f: 's1', q: p => p.qual, d: 'Points per 100 poss. above average (BPM 1.0 estimate)' },
   { k: 'vorp', l: 'VORP', f: 2, d: 'Value over replacement player' },
   { k: 'ws48', l: 'WS / 48', f: 'p3', q: p => p.qual },
+  { k: 'rapm', l: 'RAPM', f: 's1', q: p => p.qual && p.rapm != null, d: 'Adjusted plus-minus: on-court impact controlling for teammates and opponents' },
+  { k: 'rapm_o', l: 'Offensive RAPM', f: 's1', q: p => p.qual && p.rapm != null },
+  { k: 'rapm_d', l: 'Defensive RAPM', f: 's1', q: p => p.qual && p.rapm != null },
   { k: 'oo_net', l: 'On-Off Net Rating', f: 's1', q: p => p.qoo, d: 'Team net rating with him on court minus with him off' },
   { k: 'oo_ortg', l: 'On-Off Off. Rating', f: 's1', q: p => p.qoo },
   { k: 'oo_drtg', l: 'On-Off Def. Rating', f: 's1', q: p => p.qoo, asc: 1 },
@@ -292,10 +295,10 @@ function leaderCard(c, mode, n = 10) {
     <a class="lead" href="#/player/${top.id}">${hsImg(top, 260, '')}<div class="info"><div class="cat">${c.l}${c.cnt && mode === 'p36' ? ' / 36' : ''}</div>
       <div class="big">${fmt(top[k], f)}</div><div class="who">${esc(top.name)} <small>${esc(top.t?.abbr || '')}</small></div></div></a>
     <ol>${rows.slice(1).map((p, i) => `<li><a href="#/player/${p.id}"><span class="i">${i + 2}</span>${hsImg(p, 60)}<span class="nm">${esc(p.name)}<small>${esc(p.t?.abbr || '')}</small></span><span class="v">${fmt(p[k], f)}</span></a></li>`).join('')}</ol>
-    <a class="more" href="#/players?sort=${k}${c.asc ? '&asc=1' : ''}&mode=${['pts', 'reb', 'ast', 'stl', 'blk', 'tpm'].includes(c.k) ? mode : /^(oo|on)_/.test(c.k) ? 'oo' : 'adv'}">Full list →</a></div>`;
+    <a class="more" href="#/players?sort=${k}${c.asc ? '&asc=1' : ''}&mode=${['pts', 'reb', 'ast', 'stl', 'blk', 'tpm'].includes(c.k) ? mode : /^(oo_|on_|rapm)/.test(c.k) ? 'oo' : 'adv'}">Full list →</a></div>`;
 }
 async function leaders() {
-  app.innerHTML = `<div class="pagehead"><div><h1>League Leaders</h1><p>Qualified: played ≥ 50% of team games and ≥ 12 min per game. Shooting % require minimum makes. On/off ratings need 250+ minutes on court and 100+ off.</p></div>
+  app.innerHTML = `<div class="pagehead"><div><h1>League Leaders</h1><p>Qualified: played ≥ 50% of team games and ≥ 12 min per game. Shooting % require minimum makes. On/off ratings need 250+ minutes on court and 100+ off. RAPM adjusts for teammates and opponents.</p></div>
     <div class="seg" id="mode"><button data-m="pg" class="on">Per Game</button><button data-m="tot">Totals</button><button data-m="p36">Per 36</button></div></div>
     <div class="grid leaders-grid" id="lg"></div>`;
   const draw = m => {
@@ -319,7 +322,9 @@ const P_MODES = {
   shoot: { l: 'Shooting', cols: () => [cGP, { k: 'fgm', l: 'FGM', f: 1 }, { k: 'fga', l: 'FGA', f: 1 }, { k: 'fgp', l: 'FG%', f: 'p' }, { k: 'tpm', l: '3PM', f: 1 }, { k: 'tpa', l: '3PA', f: 1 }, { k: 'tpp', l: '3P%', f: 'p' },
     { k: 'ftm', l: 'FTM', f: 1 }, { k: 'fta', l: 'FTA', f: 1 }, { k: 'ftp', l: 'FT%', f: 'p' }, { k: 'efg', l: 'eFG%', f: 'p' }, { k: 'ts', l: 'TS%', f: 'p' }, { k: 'tpar', l: '3PAr', f: 'p3' }, { k: 'ftr', l: 'FTr', f: 'p3' }, { k: 'hi_pts', l: 'High', f: 0 }], key: 'ts' },
 };
-P_MODES.oo = { l: 'On/Off', key: 'oo_net', cols: () => [cGP, { k: 'on_min', l: 'On MIN', f: 0 }, { k: 'off_min', l: 'Off MIN', f: 0 },
+P_MODES.oo = { l: 'Impact', key: 'rapm', cols: () => [cGP, { k: 'on_min', l: 'On MIN', f: 0 }, { k: 'off_min', l: 'Off MIN', f: 0 },
+  { k: 'rapm', l: 'RAPM', f: 's1', sc: 1, t: 'Regularized adjusted plus-minus (per 100 poss.), controls for teammates & opponents' }, { k: 'rapm_o', l: 'O-RAPM', f: 's1', sc: 1 }, { k: 'rapm_d', l: 'D-RAPM', f: 's1', sc: 1 },
+  { k: 'rapm0', l: 'Pure RAPM', f: 's1', sc: 1, t: 'RAPM without the box-score prior' },
   { k: 'on_ortg', l: 'On ORtg', f: 1 }, { k: 'off_ortg', l: 'Off ORtg', f: 1 }, { k: 'oo_ortg', l: '± ORtg', f: 's1', sc: 1, t: 'On minus off (higher = better offense with him)' },
   { k: 'on_drtg', l: 'On DRtg', f: 1, asc: 1 }, { k: 'off_drtg', l: 'Off DRtg', f: 1, asc: 1 }, { k: 'oo_drtg', l: '± DRtg', f: 's1', asc: 1, t: 'On minus off (negative = better defense with him)', h: r => `<span class="${sgnCls(-(r.oo_drtg ?? 0))}">${fmt(r.oo_drtg, 's1')}</span>` },
   { k: 'on_net', l: 'On Net', f: 's1', sc: 1 }, { k: 'off_net', l: 'Off Net', f: 's1', sc: 1 }, { k: 'oo_net', l: 'On-Off', f: 's1', sc: 1, t: 'On-court net minus off-court net' }, { k: 'on_pm', l: 'On +/-', f: 's0', sc: 1 }] };
@@ -364,7 +369,7 @@ function rankAmong(p, k, asc) {
 async function player(id) {
   const p = P[id];
   if (!p) { app.innerHTML = '<div class="loading">Player not found</div>'; return; }
-  const { log } = await api(`player/${id}/log`);
+  const [{ log }, { splits }] = await Promise.all([api(`player/${id}/log`), api(`player/${id}/splits`).catch(() => ({ splits: [] }))]);
   const t = p.t;
   const tiles = [['PTS', p.pts, 1, 'pts'], ['REB', p.reb, 1, 'reb'], ['AST', p.ast, 1, 'ast'], ['TS%', p.ts, 'p', 'ts'], ['PER', p.per, 1, 'per'], ['WS', p.ws, 1, 'ws'], ['BPM', p.bpm, 's1', 'bpm'], ['+/-', p.pm_g, 's1', 'pm_g']];
   const bio = [['Age', p.age], ['Height', p.ht], ['Weight', p.wt ? p.wt + ' lb' : ''], ['Exp', p.exp != null ? (p.exp ? p.exp + ' yrs' : 'Rookie') : ''], ['College', p.college]].filter(x => x[1]);
@@ -383,6 +388,7 @@ async function player(id) {
       <div class="card flush"><div class="hd"><h2>Advanced</h2></div><div id="adv"></div></div>
     </div>
     <div class="card flush mt"><div class="hd"><h2>On / Off Court</h2><span class="sub">Team per 100 possessions, in games he played</span></div><div id="oo"></div></div>
+    <div class="card flush mt"><div class="hd"><h2>With & Without Teammates</h2><span class="sub">Team net rating per 100 possessions · minutes in grey</span></div><div id="splits"></div></div>
     <div class="card flush mt"><div class="hd"><h2>Game Log</h2></div><div id="log"></div></div>`;
   // season table
   const sRows = [
@@ -405,6 +411,17 @@ async function player(id) {
       <tr><td class="l muted">League rank</td><td></td><td class="muted">${rk('oo_ortg')}</td><td class="muted">${rk('oo_drtg', 1)}</td><td class="muted">${rk('oo_net')}</td></tr>
     </tbody></table></div>${p.qoo ? '' : '<div class="sub" style="padding:8px 16px 12px">Not ranked: needs 250+ minutes on and 100+ off court.</div>'}`;
   }
+  // RAPM + teammate splits
+  if (p.rapm != null) {
+    const pool = D.players.filter(x => x.qual && x.rapm != null);
+    const rk = k => p.qual ? `#${1 + pool.filter(x => x[k] > p[k]).length} of ${pool.length}` : '';
+    $('#oo').insertAdjacentHTML('beforeend', `<div class="tiles" style="padding:0 16px 14px">${[['RAPM', 'rapm'], ['Off RAPM', 'rapm_o'], ['Def RAPM', 'rapm_d'], ['Pure RAPM', 'rapm0']].map(([l, k]) => `<div class="tile"><div class="k">${l}</div><div class="v ${sgnCls(p[k])}">${fmt(p[k], 's1')}</div><div class="r">${rk(k)}</div></div>`).join('')}</div>
+      <div class="sub" style="padding:0 16px 14px">Raw on/off credits a player for whoever he shares the floor with. RAPM fits every stint of the season at once (all ten players on court), so shared minutes are split by what happens when each player plays without the other. It is shrunk toward his box score (BPM) until the minutes say otherwise; "Pure RAPM" uses no box score.</div>`);
+  }
+  const net = c => c && c.net != null ? `<b class="${sgnCls(c.net)}">${fmt(c.net, 's1')}</b> <span class="muted">${c.min}</span>` : `<span class="muted">${c ? c.min + ' min' : '–'}</span>`;
+  const sp = splits.filter(x => P[x.id]);
+  $('#splits').innerHTML = sp.length ? `<div class="tw"><table class="t"><thead><tr><th class="l">Teammate</th><th>Both on</th><th>${esc(p.short || p.name)} only</th><th>Teammate only</th><th>Neither</th></tr></thead><tbody>${sp.map(x => `<tr><td class="l stick"><a class="pl" href="#/player/${x.id}">${hsImg(P[x.id], 68)}<span class="nm">${esc(P[x.id].name)}</span></a></td><td>${net(x.both)}</td><td>${net(x.me)}</td><td>${net(x.mate)}</td><td>${net(x.neither)}</td></tr>`).join('')}</tbody></table></div>`
+    : '<div class="sub" style="padding:0 16px 14px">No teammates with 30+ shared minutes yet.</div>';
   // log
   log.forEach(g => {
     g.day = D.games.find(x => x.id === g.game_id)?.day || g.date.slice(0, 10);
@@ -764,6 +781,25 @@ async function charts() {
         quads: ['Defensive anchor', 'Two-way impact', 'Hurts both ends', 'Offensive engine'],
         pts: ps.map(p => ({ x: p.oo_ortg, y: p.oo_drtg, kind: 'hs', r: 0.45 + 0.55 * Math.sqrt(p.on_min / mx), img: hsUrl(p, 96), color: p.t?.tc || '#888', href: '#/player/' + p.id,
           tip: `<b>${esc(p.name)}</b> <span class="muted">${esc(p.t?.abbr || '')}</span>${tipRows([['ORtg on / off', `${fmt(p.on_ortg, 1)} / ${fmt(p.off_ortg, 1)}`], ['DRtg on / off', `${fmt(p.on_drtg, 1)} / ${fmt(p.off_drtg, 1)}`], ['Net swing', fmt(p.oo_net, 's1')]])}` })) });
+    }],
+    ['rapm', 'Two-Way Impact (RAPM)', 'Offensive vs defensive RAPM: each player\'s estimated points per 100 possessions added on each end, after controlling for teammates and opponents. Rotation players with 300+ minutes.', el => {
+      const ps = D.players.filter(p => p.rapm != null && p.min >= 300);
+      const mx = Math.max(...ps.map(p => p.min));
+      scatter(el, {
+        id: 'rapm', xf: v => (v > 0 ? '+' : '') + v, yf: v => (v > 0 ? '+' : '') + v, xl: 'Offensive RAPM →', yl: 'Defensive RAPM →', avgX: 0, avgY: 0, size: innerWidth < 560 ? 30 : 40,
+        diags: [-4, 0, 4, 8].map(c => ({ slope: -1, c, label: (c > 0 ? '+' : c < 0 ? '−' : '') + Math.abs(c) + ' total', at: .94 })),
+        quads: ['Defensive specialist', 'Two-way star', 'Negative both ends', 'Offensive specialist'],
+        pts: ps.map(p => ({ x: p.rapm_o, y: p.rapm_d, kind: 'hs', r: 0.45 + 0.55 * Math.sqrt(p.min / mx), img: hsUrl(p, 96), color: p.t?.tc || '#888', href: '#/player/' + p.id,
+          tip: `<b>${esc(p.name)}</b> <span class="muted">${esc(p.t?.abbr || '')}</span>${tipRows([['RAPM', fmt(p.rapm, 's1')], ['Offense', fmt(p.rapm_o, 's1')], ['Defense', fmt(p.rapm_d, 's1')], ['Raw on-off', fmt(p.oo_net, 's1')]])}` })) });
+    }],
+    ['shrink', 'Raw On/Off vs RAPM', 'Raw on-off net rating against teammate-adjusted RAPM. Players far right but low have been riding a great teammate (or a weak bench behind them); RAPM gives the credit back to whoever earned it.', el => {
+      const ps = D.players.filter(p => p.qoo && p.rapm != null);
+      const mx = Math.max(...ps.map(p => p.on_min));
+      scatter(el, {
+        id: 'shrink', xf: v => (v > 0 ? '+' : '') + v, yf: v => (v > 0 ? '+' : '') + v, xl: 'Raw on-off net rating →', yl: 'RAPM →', avgX: 0, avgY: 0, size: innerWidth < 560 ? 30 : 40,
+        quads: ['Underrated by raw on/off', 'Truly elite', 'Negative impact', 'Helped by teammates'],
+        pts: ps.map(p => ({ x: p.oo_net, y: p.rapm, kind: 'hs', r: 0.45 + 0.55 * Math.sqrt(p.on_min / mx), img: hsUrl(p, 96), color: p.t?.tc || '#888', href: '#/player/' + p.id,
+          tip: `<b>${esc(p.name)}</b> <span class="muted">${esc(p.t?.abbr || '')}</span>${tipRows([['Raw on-off', fmt(p.oo_net, 's1')], ['RAPM', fmt(p.rapm, 's1')], ['Min on / off', `${p.on_min} / ${p.off_min}`]])}` })) });
     }],
     ['elo', 'Elo Through the Season', 'Every team\'s Elo after each game. Tap logos to highlight teams.', el => {
       const sorted = D.teams.slice().sort((a, b) => b.elo - a.elo);
