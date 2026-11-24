@@ -54,3 +54,7 @@ Each finished game is downloaded once and kept:
 - `plays`: play-by-play, one row per event (`t` = seconds elapsed, `p1..p3` = participant ids, `x/y` shot location)
 - Derived from play-by-play: `stints` (same ten players on court) and `player_onoff`. These are recomputed from
   `raw_summaries` whenever `fetch::DERIVE_VERSION` is bumped, with no network calls. Run `app derive --all` to force it.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
